@@ -19,6 +19,25 @@ def find_by_name_size(session: Session, organization_id: uuid.UUID, file_name: s
     ).scalar_one_or_none()
 
 
+def find_by_names(session: Session, organization_id: uuid.UUID, file_names: list[str]) -> dict[str, dict[str, Any]]:
+    """Library documents whose name (case-insensitive, extension included) is one of these, keyed by the
+    normalised name; size is not compared (design.md §5.2a)."""
+    if not file_names:
+        return {}
+    rows = session.execute(text("""
+        SELECT DISTINCT ON (file_name_norm) document_id, file_name_norm, size_bytes, added_at, current_version
+        FROM documents WHERE organization_id = :org AND file_name_norm = ANY(:names)
+        ORDER BY file_name_norm, added_at DESC"""),
+        {"org": organization_id, "names": [file_name_norm(n) for n in file_names]}).mappings()
+    return {r["file_name_norm"]: dict(r) for r in rows}
+
+
+def exists(session: Session, organization_id: uuid.UUID, document_id: uuid.UUID) -> bool:
+    """True if the organization has this document."""
+    return session.execute(text("SELECT 1 FROM documents WHERE organization_id = :org AND document_id = :id"),
+                           {"org": organization_id, "id": document_id}).first() is not None
+
+
 @dataclass(frozen=True)
 class Duplicate:
     """A library document a candidate duplicates, and how: same_content or same_title."""
@@ -57,9 +76,51 @@ def document_id_for(staged_id: uuid.UUID) -> uuid.UUID:
     return uuid.uuid5(DOCUMENT_NAMESPACE, str(staged_id))
 
 
-def document_key(organization_id: uuid.UUID, document_id: uuid.UUID, file_name: str) -> str:
-    """ClinSync/processed/{org}/{document_id}/v1_{file_name} (version 1: replace is out of scope)."""
-    return f"ClinSync/processed/{organization_id}/{document_id}/v1_{file_name}"
+def document_key(organization_id: uuid.UUID, document_id: uuid.UUID, file_name: str, version: int = 1) -> str:
+    """ClinSync/processed/{org}/{document_id}/v{version}_{file_name}."""
+    return f"ClinSync/processed/{organization_id}/{document_id}/v{version}_{file_name}"
+
+
+@dataclass(frozen=True)
+class ReplaceTarget:
+    """The library document a replace candidate supersedes, locked for the commit."""
+
+    document_id: uuid.UUID
+    current_version: int
+    content_hash: str
+    s3_key: str
+
+
+def lock_for_replace(session: Session, organization_id: uuid.UUID, document_id: uuid.UUID) -> ReplaceTarget | None:
+    """The document to replace, FOR UPDATE, or None if it is gone (design.md §5.2a)."""
+    row = session.execute(text("""
+        SELECT document_id, current_version, content_hash, s3_key FROM documents
+        WHERE organization_id = :org AND document_id = :id FOR UPDATE"""),
+        {"org": organization_id, "id": document_id}).mappings().one_or_none()
+    return ReplaceTarget(**row) if row else None
+
+
+def other_with_content(session: Session, organization_id: uuid.UUID, content_hash: str,
+                       document_id: uuid.UUID) -> uuid.UUID | None:
+    """Another library document (not this one) with the same content, if any."""
+    return session.execute(text("""
+        SELECT document_id FROM documents
+        WHERE organization_id = :org AND content_hash = :hash AND document_id <> :id LIMIT 1"""),
+        {"org": organization_id, "hash": content_hash, "id": document_id}).scalar_one_or_none()
+
+
+def replace_version(session: Session, *, document_id: uuid.UUID, version: int, file_name: str, file_ext: str,
+                    size_bytes: int, content_hash: str, s3_key: str, source_file_id: uuid.UUID,
+                    uploaded_by: int) -> None:
+    """Move the document to a new version in place: same id and title, the new file's name, size, hash and key."""
+    session.execute(text("""
+        UPDATE documents SET current_version = :v, file_name = :file_name, file_name_norm = :file_name_norm,
+               file_ext = :ext, size_bytes = :size, content_hash = :hash, s3_key = :key, source_file_id = :source,
+               version_uploaded_at = now(), version_uploaded_by = :by, updated_at = now()
+        WHERE document_id = :id"""),
+        {"id": document_id, "v": version, "file_name": file_name, "file_name_norm": file_name_norm(file_name),
+         "ext": file_ext, "size": size_bytes, "hash": content_hash, "key": s3_key, "source": source_file_id,
+         "by": uploaded_by})
 
 
 def lock_organization(session: Session, organization_id: uuid.UUID) -> None:

@@ -1,0 +1,113 @@
+-batch
+  API->>Worker: enqueue ingest (server-side)
+
+  User->>UI: Continue to Tagging
+  User->>UI: Confirm and Continue
+  loop until still_in_progress = 0
+    UI->>API: POST .../batches/{id}/commit
+  end
+  UI->>API: GET /api/v1/library/documents
+```
+
+Worker progress is **not** shown on the Uploading or Tagging steps in the current UI; commit waits until the server reports nothing still in progress.
+
+---
+
+## 8. Frontend module map
+
+```
+frontend/src/
+├── pages/content-library/
+│   ├── ContentLibraryPage.tsx      ← Wizard orchestration (step, batchId, upload(), commit)
+│   ├── conflicts.ts                ← buildConflicts, applyResolutions
+│   ├── uploadRowState.ts           ← Uploading step row display
+│   ├── steps/
+│   │   ├── LibraryStep.tsx         ← Document table + download
+│   │   ├── AddContentStep.tsx      ← Dropzone, queue, Upload button
+│   │   ├── UploadingStep.tsx       ← Progress, Retry, Continue
+│   │   └── TagDocumentsStep.tsx    ← Tags UI + Confirm
+│   └── components/
+│       ├── ConflictModal.tsx       ← Replace / keep / remove wizard
+│       ├── StatusPill.tsx
+│       └── StepBadge.tsx
+├── context/
+│   └── UploadQueueContext.tsx      ← Global queue; startCloudUploads; complete-batch
+├── components/ui/uploadFile/
+│   ├── UploadDropzone.tsx
+│   ├── GlobalUploadWidget.tsx      ← Mini queue on other dashboard pages
+│   └── StoredUploadsTable.tsx      ← Used by LibraryStep
+├── utils/
+│   ├── s3ChunkedUpload.ts          ← S3MultipartUploader, complete-batch
+│   ├── uploadsApi.ts               ← library, check-duplicates, download URL
+│   ├── reviewApi.ts                ← commitBatchWhenReady
+│   ├── contentValidation.ts        ← ZIP / extension rules
+│   ├── duplicateCheck.ts           ← groupQueueDuplicates (in-upload dupes)
+│   └── uploadConfig.ts             ← max size, allowed extensions
+└── types/contentLibrary.ts         ← UploadQueueItem, CloudUploadState
+```
+
+**Provider placement:** `UploadQueueProvider` wraps the dashboard layout so uploads survive navigation until acknowledged.
+
+---
+
+## 9. State and data shapes
+
+### 9.1 `UploadQueueItem` (key fields)
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Client queue id; sent as `clientRef` in check-duplicates |
+| `file` | Browser `File` object |
+| `status` | `queued` · `success` · `validation-failed` · … |
+| `validated` / `validation` | Local ZIP deep check result + warnings |
+| `cloudUpload` | S3 progress: `uploading` · `success` · `failed` |
+| `replacesDocumentId` | Set after conflict modal → passed to `initiate` |
+| `source` | `'content-library'` — filters global queue on this page |
+
+### 9.2 Page-level state (`ContentLibraryPage`)
+
+| State | Role |
+|-------|------|
+| `step` | `library` \| `add` \| `uploading` \| `tagging` |
+| `batchId` | Current Upload click; restored from queue if user returns mid-upload |
+| `conflicts` | `{ pending, list }` while modal open |
+| `library` | Documents from GET library |
+
+---
+
+## 10. Errors, retry, and known gaps
+
+| Scenario | Frontend behaviour |
+|----------|-------------------|
+| Unsupported type / empty / too large | Row rejected on drop; never uploaded |
+| ZIP bad entries | **Warnings** on row; upload allowed if at least one usable entry |
+| check-duplicates fails | Banner on Add Content; modal not shown |
+| Part upload fails | Row failed; **Retry** on Uploading step |
+| complete-batch partial failure | Per-file error in batch response; failed rows retryable |
+| Duplicate refused at initiate | Failed row; message from server; typically not retryable |
+| User removes item during upload | `cancel()` → best-effort `POST abort` |
+
+**Known gaps (POC)**
+
+- No `GET …/parts` resume after full page reload.
+- No live worker status on Uploading step (`processing` / `entries_done`).
+- Tag specialties / document types are UI-only until backend accepts them on commit.
+
+---
+
+## Quick reference — API calls by user action
+
+| User action | API calls |
+|-------------|-----------|
+| Open Content Library | `GET /api/v1/library/documents` |
+| Drop files | *(none)* |
+| Click Upload | `POST /api/uploads/check-duplicates` |
+| Save Selection (if modal) | *(then same as upload start)* |
+| Upload start (per file, parallel) | `initiate` → `parts/presign` → S3 `PUT` |
+| All parts done | `POST /api/uploads/complete-batch` |
+| Confirm & Continue | `POST /api/v1/uploads/batches/{id}/commit` (repeat while `still_in_progress`) |
+| Download in library | `GET /api/v1/library/documents/{id}/download` |
+
+---
+
+*For line-level API contracts and JSON fixtures, see `docs/lld-frontend-upload.md` and `backend/tests/api/fixtures/upload_api/`.*

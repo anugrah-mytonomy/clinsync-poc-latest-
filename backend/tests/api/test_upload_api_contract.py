@@ -93,6 +93,18 @@ def assert_same_error(response: Any, fx: dict[str, Any]) -> None:
     assert response.json() == fx["response"]["body"]
 
 
+def upload_meta(db: Session, body: dict[str, Any]) -> dict[str, Any]:
+    """batch_id and s3_key for an initiate response."""
+    return dict(db.execute(text("SELECT batch_id, s3_key FROM upload_file WHERE file_id = :f"),
+                           {"f": body["fileId"]}).mappings().one())
+
+
+def upload_meta(db: Session, body: dict[str, Any]) -> dict[str, Any]:
+    """batch_id and s3_key for an initiate response."""
+    return dict(db.execute(text("SELECT batch_id, s3_key FROM upload_file WHERE file_id = :f"),
+                           {"f": body["fileId"]}).mappings().one())
+
+
 def add_library_document(db: Session, file_name: str, size_bytes: int) -> None:
     """A document already in the library, for the duplicate cases."""
     document_id = uuid.uuid4()
@@ -128,8 +140,14 @@ def test_initiate(client: TestClient) -> None:
     expected = fx["response"]["body"]
     assert (body["partSize"], body["totalParts"]) == (expected["partSize"], expected["totalParts"])
     assert body["id"] == body["fileId"] and uuid.UUID(body["batchId"])
-    assert body["key"].startswith(f"ClinSync/incoming/{POC_ORG}/{body['batchId']}/{body['id']}_")
+    assert body["key"].startswith(f"clynsync/incoming/{body['batchId']}/{body['id']}_")
     assert body["key"].endswith("_report.pdf")
+    assert set(body["parts"]) == {str(n) for n in range(1, body["totalParts"] + 1)}
+    for url in body["parts"].values():
+        assert isinstance(url, str) and url.startswith("http")
+    assert set(body["parts"]) == {str(n) for n in range(1, body["totalParts"] + 1)}
+    for url in body["parts"].values():
+        assert isinstance(url, str) and url.startswith("http")
 
 
 def test_initiate__409_duplicate(client: TestClient, db_session: Session) -> None:
@@ -159,7 +177,7 @@ def initiated(client: TestClient) -> dict[str, Any]:
 def test_parts_presign(client: TestClient) -> None:
     """The fixture body, with our key and uploadId → a URL for each part number asked for."""
     ids = initiated(client)
-    response, fx = send(client, "parts_presign", key=ids["key"], uploadId=ids["uploadId"])
+    response, fx = send(client, "parts_presign", fileId=ids["fileId"], uploadId=ids["uploadId"])
     body = assert_success_fields(response, fx)
     assert set(body["urls"]) == set(fx["response"]["body"]["urls"]) == {"1", "2"}
 
@@ -167,7 +185,7 @@ def test_parts_presign(client: TestClient) -> None:
 def test_parts_presign__400_empty(client: TestClient) -> None:
     """partNumbers [] → 400 with exactly the fixture's detail (checked before the row)."""
     ids = initiated(client)
-    response, fx = send(client, "parts_presign__400_empty", key=ids["key"], uploadId=ids["uploadId"])
+    response, fx = send(client, "parts_presign__400_empty", fileId=ids["fileId"], uploadId=ids["uploadId"])
     assert_same_error(response, fx)
 
 
@@ -176,7 +194,7 @@ def test_list_parts(client: TestClient, fake_storage: FakeStorage) -> None:  # n
     ids = initiated(client)
     for n in (2, 1):
         fake_storage.put_part(ids["uploadId"], n)
-    path = f"/api/uploads/{ids['uploadId']}/parts?key={quote(ids['key'], safe='')}"
+    path = f"/api/uploads/{ids['uploadId']}/parts?fileId={ids['fileId']}"
     response, fx = send(client, "list_parts", path=path)
     body = assert_success_fields(response, fx)
     for item in body["parts"]:
@@ -195,9 +213,9 @@ def set_status(db: Session, file_id: str, status: str) -> None:
 def test_abort(client: TestClient, db_session: Session) -> None:
     """Mid-upload abort → exactly the fixture body {"ok": true}; the file ends error "Upload cancelled"."""
     ids = initiated(client)
-    response, fx = send(client, "abort", key=ids["key"], uploadId=ids["uploadId"])
+    response, fx = send(client, "abort", fileId=ids["fileId"], uploadId=ids["uploadId"])
     assert response.status_code == 200 and response.json() == fx["response"]["body"]
-    row = full_row(db_session, uuid.UUID(ids["id"]))
+    row = full_row(db_session, uuid.UUID(ids["fileId"]))
     assert (row["status"], row["status_message"]) == ("error", "Upload cancelled")
 
 
@@ -210,18 +228,18 @@ def test_abort__200_unknown_pair(client: TestClient) -> None:
 def test_abort__200_completed_file(client: TestClient, db_session: Session) -> None:
     """What the client sends when a finished row is removed: {"ok": true}, and the file is untouched (D15)."""
     ids = initiated(client)
-    set_status(db_session, ids["id"], "processed")
-    before = full_row(db_session, uuid.UUID(ids["id"]))
-    response, fx = send(client, "abort__200_completed_file", key=ids["key"], uploadId=ids["uploadId"])
+    set_status(db_session, ids["fileId"], "processed")
+    before = full_row(db_session, uuid.UUID(ids["fileId"]))
+    response, fx = send(client, "abort__200_completed_file", fileId=ids["fileId"], uploadId=ids["uploadId"])
     assert response.status_code == 200 and response.json() == fx["response"]["body"]
-    assert full_row(db_session, uuid.UUID(ids["id"])) == before
+    assert full_row(db_session, uuid.UUID(ids["fileId"])) == before
 
 
 def test_list_parts__404_after_abort(client: TestClient) -> None:
     """INTENDED (U2.2): after abort the row check refuses first — 409, still a failure, with the detail body."""
     ids = initiated(client)
-    send(client, "abort", key=ids["key"], uploadId=ids["uploadId"])
-    path = f"/api/uploads/{ids['uploadId']}/parts?key={quote(ids['key'], safe='')}"
+    send(client, "abort", fileId=ids["fileId"], uploadId=ids["uploadId"])
+    path = f"/api/uploads/{ids['uploadId']}/parts?fileId={ids['fileId']}"
     response, _ = send(client, "list_parts__404_after_abort", path=path)
     assert response.status_code == 409 and response.json() == {"detail": "Upload is not awaiting completion."}
 
@@ -229,15 +247,15 @@ def test_list_parts__404_after_abort(client: TestClient) -> None:
 def test_list_uploads(client: TestClient, db_session: Session) -> None:
     """Every fixture field on every item; uploads past `uploading` only, newest first."""
     first, second = initiated(client), initiated(client)
-    set_status(db_session, first["id"], "processed")
-    set_status(db_session, second["id"], "uploaded")
+    set_status(db_session, first["fileId"], "processed")
+    set_status(db_session, second["fileId"], "uploaded")
     # One test transaction gives both rows the same created_at; age the first so "newest first" is observable.
     db_session.execute(text("UPDATE upload_file SET created_at = created_at - interval '1 minute' WHERE file_id = :id"),
-                       {"id": first["id"]})
+                       {"id": first["fileId"]})
     db_session.commit()
     response, fx = send(client, "list_uploads")
     body = assert_success_fields(response, fx)
-    assert [item["id"] for item in body] == [second["id"], first["id"]]
+    assert [item["id"] for item in body] == [second["fileId"], first["fileId"]]
     assert set(fx["response"]["body"][0]) == set(body[0])
 
 
@@ -248,10 +266,11 @@ def uploaded_parts(client: TestClient, fake_storage: FakeStorage, filename: str,
     ids = client.post("/api/uploads/initiate", json={"filename": filename, "fileSize": size,
                                                       "contentType": "application/octet-stream"}).json()
     numbers = list(range(1, ids["totalParts"] + 1))
-    client.post("/api/uploads/parts/presign", json={"key": ids["key"], "uploadId": ids["uploadId"],
+    client.post("/api/uploads/parts/presign", json={"fileId": ids["fileId"], "uploadId": ids["uploadId"],
                                                     "partNumbers": numbers})
     parts = [{"partNumber": n, "etag": fake_storage.put_part(ids["uploadId"], n)} for n in numbers]
-    return {"id": ids["id"], "fileId": ids["fileId"], "key": ids["key"], "uploadId": ids["uploadId"], "parts": parts}
+    fid = ids["fileId"]
+    return {"id": fid, "fileId": fid, "uploadId": ids["uploadId"], "parts": parts}
 
 
 def complete_as_fixture(client: TestClient, fake_storage: FakeStorage, name: str) -> tuple[Any, dict[str, Any]]:  # noqa: F811
@@ -266,7 +285,7 @@ def test_complete(client: TestClient, fake_storage: FakeStorage, enqueued: Recor
     response, fx = complete_as_fixture(client, fake_storage, "complete")
     body = assert_success_fields(response, fx)
     assert body["status"] == "uploaded" and uuid.UUID(body["batchId"])
-    assert body["key"].startswith(f"ClinSync/incoming/{POC_ORG}/{body['batchId']}/{body['id']}_")
+    assert body["key"].startswith(f"clynsync/incoming/{body['batchId']}/{body['id']}_")
     assert enqueued.calls == [(body["id"], str(POC_ORG))]
 
 

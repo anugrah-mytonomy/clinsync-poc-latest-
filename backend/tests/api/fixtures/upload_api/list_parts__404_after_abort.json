@@ -3,7 +3,7 @@
   "captured_from": "File Upload POC @ 3d2bed9, unmodified; S3 = LocalStack (http://localhost:4566)",
   "request": {
     "method": "GET",
-    "path": "/api/uploads/JjUDWDCRAu_0b70eRtAMcZtI5AI0noUiYVJi7eJ160QkuLRcHdoccW7if1Uyie0YaWis-qyi-52_sI4lzl6I8KQrtEkf6Fg1_Q6z1cswRS2z7zik0prAsjgLWN--ag12/parts?key=processed/ce68bdbe-ce48-4900-9796-ad3affc6eebf/abort-me.pdf",
+    "path": "/api/uploads/JjUDWDCRAu_0b70eRtAMcZtI5AI0noUiYVJi7eJ160QkuLRcHdoccW7if1Uyie0YaWis-qyi-52_sI4lzl6I8KQrtEkf6Fg1_Q6z1cswRS2z7zik0prAsjgLWN--ag12/parts?fileId=036af1f0-1525-48fa-9ea4-8f35c9b1d115",
     "headers": {},
     "body": null
   },

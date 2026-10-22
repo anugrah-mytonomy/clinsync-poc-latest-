@@ -24,12 +24,16 @@ def get_producer() -> Celery:
     return producer
 
 
-def enqueue_process_upload(file_id: str, organization_id: str) -> None:
+def enqueue_process_upload(file_id: str, organization_id: str, *, countdown: int = 0) -> None:
     """Publish process_upload for one file. Raises if Redis is unreachable."""
     producer = get_producer()
     try:
-        producer.send_task(TASK_PROCESS_UPLOAD, kwargs={"file_id": file_id, "organization_id": organization_id},
-                           queue=QUEUE_INGEST)
+        producer.send_task(
+            TASK_PROCESS_UPLOAD,
+            kwargs={"file_id": file_id, "organization_id": organization_id},
+            queue=QUEUE_INGEST,
+            countdown=max(0, countdown),
+        )
     except Exception:
         reset_producer()
         raise

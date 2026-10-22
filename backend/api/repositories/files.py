@@ -176,8 +176,8 @@ def check_seed_files(files: list[tuple[str, str]], allowed_ext: list[str]) -> No
     for file_name, s3_key in files:
         if file_ext_of(file_name) not in allowed_ext:
             raise InvalidInput(f"{file_name!r}: extension not allowed (allowed: {', '.join(allowed_ext)})")
-        if not s3_key.startswith("ClinSync/incoming/"):
-            raise InvalidInput(f"{s3_key!r}: s3_key must be under ClinSync/incoming/")
+        if not s3_key.startswith("clynsync/incoming/"):
+            raise InvalidInput(f"{s3_key!r}: s3_key must be under clynsync/incoming/")
 
 
 def seed_batch(session: Session, organization_id: uuid.UUID, created_by: int, files: list[tuple[str, str, int]],
@@ -227,6 +227,81 @@ class ConfirmResult:
     transitioned: bool
 
 
+def ingest_enqueue_countdown_seconds(session: Session, file_id: uuid.UUID) -> int:
+    """Celery countdown so batch files enter `processing` one after another (local/demo)."""
+    from shared.config import get_settings
+
+    stagger = get_settings().INGEST_STAGGER_SECONDS
+    if stagger <= 0:
+        return 0
+    ord_row = session.execute(
+        text("""
+        WITH ranked AS (
+            SELECT file_id,
+                   row_number() OVER (ORDER BY created_at, file_name, file_id) - 1 AS ord
+            FROM upload_file
+            WHERE batch_id = (SELECT batch_id FROM upload_file WHERE file_id = :f)
+        )
+        SELECT ord FROM ranked WHERE file_id = :f
+        """),
+        {"f": file_id},
+    ).scalar_one_or_none()
+    session.rollback()
+    if ord_row is None:
+        return 0
+    return int(ord_row * stagger)
+
+
+def ingest_enqueue_countdown_seconds(session: Session, file_id: uuid.UUID) -> int:
+    """Celery countdown so batch files enter `processing` one after another (local/demo)."""
+    from shared.config import get_settings
+
+    stagger = get_settings().INGEST_STAGGER_SECONDS
+    if stagger <= 0:
+        return 0
+    ord_row = session.execute(
+        text("""
+        WITH ranked AS (
+            SELECT file_id,
+                   row_number() OVER (ORDER BY created_at, file_name, file_id) - 1 AS ord
+            FROM upload_file
+            WHERE batch_id = (SELECT batch_id FROM upload_file WHERE file_id = :f)
+        )
+        SELECT ord FROM ranked WHERE file_id = :f
+        """),
+        {"f": file_id},
+    ).scalar_one_or_none()
+    session.rollback()
+    if ord_row is None:
+        return 0
+    return int(ord_row * stagger)
+
+
+def ingest_enqueue_countdown_seconds(session: Session, file_id: uuid.UUID) -> int:
+    """Celery countdown so batch files enter `processing` one after another (local/demo)."""
+    from shared.config import get_settings
+
+    stagger = get_settings().INGEST_STAGGER_SECONDS
+    if stagger <= 0:
+        return 0
+    ord_row = session.execute(
+        text("""
+        WITH ranked AS (
+            SELECT file_id,
+                   row_number() OVER (ORDER BY created_at, file_name, file_id) - 1 AS ord
+            FROM upload_file
+            WHERE batch_id = (SELECT batch_id FROM upload_file WHERE file_id = :f)
+        )
+        SELECT ord FROM ranked WHERE file_id = :f
+        """),
+        {"f": file_id},
+    ).scalar_one_or_none()
+    session.rollback()
+    if ord_row is None:
+        return 0
+    return int(ord_row * stagger)
+
+
 def confirm_upload(session: Session, file_id: uuid.UUID) -> ConfirmResult | None:
     """Move staged|uploading → uploaded in one conditional UPDATE and commit; None if the file does not exist.
 
@@ -253,7 +328,8 @@ def list_batch_files(session: Session, batch_id: uuid.UUID) -> list[dict[str, ob
     if not batch_exists(session, batch_id):
         return None
     rows = session.execute(text("""
-        SELECT file_id, file_name, status, entries_total, entries_done, attempt_count, detected_type, status_message
+        SELECT file_id, client_ref, file_name, status, entries_total, entries_done, attempt_count, detected_type,
+               status_message, is_archive
         FROM upload_file WHERE batch_id = :b ORDER BY created_at, file_name, file_id"""), {"b": batch_id}).mappings()
     return [dict(r) for r in rows]
 
@@ -265,6 +341,26 @@ INSERT INTO upload_batch (batch_id, organization_id, created_by)
 VALUES (:batch_id, :org, :created_by)
 ON CONFLICT (batch_id) DO NOTHING
 """)
+
+
+def create_batch(session: Session, organization_id: uuid.UUID, created_by: int) -> uuid.UUID:
+    """Create an empty upload batch for one Upload click; commit and return its id."""
+    batch_id = session.execute(
+        text("INSERT INTO upload_batch (organization_id, created_by) VALUES (:org, :by) RETURNING batch_id"),
+        {"org": organization_id, "by": created_by},
+    ).scalar_one()
+    session.commit()
+    return batch_id
+
+
+def create_batch(session: Session, organization_id: uuid.UUID, created_by: int) -> uuid.UUID:
+    """Create an empty upload batch for one Upload click; commit and return its id."""
+    batch_id = session.execute(
+        text("INSERT INTO upload_batch (organization_id, created_by) VALUES (:org, :by) RETURNING batch_id"),
+        {"org": organization_id, "by": created_by},
+    ).scalar_one()
+    session.commit()
+    return batch_id
 
 
 def ensure_batch(session: Session, batch_id: uuid.UUID, organization_id: uuid.UUID, created_by: int) -> str:
@@ -281,17 +377,52 @@ def ensure_batch(session: Session, batch_id: uuid.UUID, organization_id: uuid.UU
 
 
 def create_upload(session: Session, *, file_id: uuid.UUID, batch_id: uuid.UUID, organization_id: uuid.UUID,
-                  file_name: str, size_bytes: int, content_type: str | None, s3_key: str, upload_id: str) -> None:
-    """Insert a `staged` upload_file row for a multipart upload just started (U1.3). The caller commits."""
+                  file_name: str, size_bytes: int, content_type: str | None, s3_key: str, upload_id: str,
+                  replaces_document_id: uuid.UUID | None = None) -> None:
+    """Insert a `staged` upload_file row for a multipart upload just started (U1.3); a replace records its target
+    (design.md §5.2a). The caller commits."""
     ext = file_ext_of(file_name)
     session.execute(text("""
         INSERT INTO upload_file (file_id, batch_id, organization_id, file_name, file_ext, size_bytes, content_type,
-                                 s3_key, upload_id, is_archive)
+                                 s3_key, upload_id, is_archive, intent, replaces_document_id)
         VALUES (:file_id, :batch_id, :org, :file_name, :ext, :size_bytes, :content_type, :s3_key, :upload_id,
-                :is_archive)"""),
+                :is_archive, :intent, :replaces)"""),
         {"file_id": file_id, "batch_id": batch_id, "org": organization_id, "file_name": file_name, "ext": ext,
          "size_bytes": size_bytes, "content_type": content_type, "s3_key": s3_key, "upload_id": upload_id,
-         "is_archive": ext == "zip"})
+         "is_archive": ext == "zip", "intent": "replace" if replaces_document_id else "new",
+         "replaces": replaces_document_id})
+
+
+def declared_size(session: Session, file_id: uuid.UUID) -> int | None:
+    """The size the client declared at initiate, or None if there is no such file."""
+    size = session.execute(text("SELECT size_bytes FROM upload_file WHERE file_id = :id"), {"id": file_id}).scalar()
+    return None if size is None else int(size)
+
+
+def batch_status(session: Session, batch_id: uuid.UUID) -> str | None:
+    """The batch's status, or None if there is no such batch."""
+    status = session.execute(text("SELECT status FROM upload_batch WHERE batch_id = :b"), {"b": batch_id}).scalar()
+    return None if status is None else str(status)
+
+
+def create_batch(session: Session, organization_id: uuid.UUID, created_by: int) -> uuid.UUID:
+    """Insert a new open batch and return its id (design.md §5.2a). Commits."""
+    batch_id = session.execute(
+        text("INSERT INTO upload_batch (organization_id, created_by) VALUES (:org, :by) RETURNING batch_id"),
+        {"org": organization_id, "by": created_by}).scalar_one()
+    session.commit()
+    return batch_id
+
+
+def delete_failed_upload(session: Session, file_id: uuid.UUID) -> bool:
+    """Delete a staged, uploading or error file that has no candidates, before a Retry re-initiates it (§5.2a).
+    True if a row went. The caller commits."""
+    deleted = session.execute(text("""
+        DELETE FROM upload_file f
+        WHERE f.file_id = :id AND f.status IN ('staged', 'uploading', 'error')
+          AND NOT EXISTS (SELECT 1 FROM staged_document c WHERE c.source_file_id = f.file_id)
+        RETURNING f.file_id"""), {"id": file_id}).first()
+    return deleted is not None
 
 
 @dataclass(frozen=True)
@@ -314,6 +445,26 @@ def find_by_upload(session: Session, upload_id: str, s3_key: str, *, lock: bool 
     return UploadRow(**row) if row else None
 
 
+def find_by_file_and_upload(session: Session, file_id: uuid.UUID, upload_id: str, *,
+                            lock: bool = False) -> UploadRow | None:
+    """The upload row for this fileId + uploadId pair, or None (U2.2); FOR UPDATE when lock is set."""
+    row = session.execute(text(f"""
+        SELECT file_id, batch_id, s3_key, upload_id, status FROM upload_file
+        WHERE file_id = :file_id AND upload_id = :upload_id {"FOR UPDATE" if lock else ""}"""),
+        {"file_id": file_id, "upload_id": upload_id}).mappings().one_or_none()
+    return UploadRow(**row) if row else None
+
+
+def find_by_file_and_upload(session: Session, file_id: uuid.UUID, upload_id: str, *,
+                            lock: bool = False) -> UploadRow | None:
+    """The upload row for this fileId + uploadId pair, or None (U2.2); FOR UPDATE when lock is set."""
+    row = session.execute(text(f"""
+        SELECT file_id, batch_id, s3_key, upload_id, status FROM upload_file
+        WHERE file_id = :file_id AND upload_id = :upload_id {"FOR UPDATE" if lock else ""}"""),
+        {"file_id": file_id, "upload_id": upload_id}).mappings().one_or_none()
+    return UploadRow(**row) if row else None
+
+
 def mark_uploading(session: Session, file_id: uuid.UUID) -> None:
     """staged → uploading on the first presign (U1.3); any other status is left alone. Commits."""
     session.execute(text("UPDATE upload_file SET status = 'uploading', updated_at = now() "
@@ -327,6 +478,26 @@ def cancel_upload(session: Session, file_id: uuid.UUID) -> None:
         UPDATE upload_file SET status = 'error', status_message = 'Upload cancelled', claim_token = NULL,
                                updated_at = now()
         WHERE file_id = :id AND status IN ('staged', 'uploading')"""), {"id": file_id})
+
+
+def mark_s3_upload_failed(session: Session, file_id: uuid.UUID, *, message: str, attempt: int) -> None:
+    """Record a failed browser→S3 upload; terminal `error`, not queued for ingest."""
+    session.execute(text("""
+        UPDATE upload_file
+        SET status = 'error', status_message = :message, claim_token = NULL,
+            attempt_count = greatest(attempt_count, :attempt), updated_at = now()
+        WHERE file_id = :id AND status IN ('staged', 'uploading')"""),
+        {"id": file_id, "message": truncate_message(message), "attempt": attempt})
+
+
+def mark_s3_upload_failed(session: Session, file_id: uuid.UUID, *, message: str, attempt: int) -> None:
+    """Record a failed browser→S3 upload; terminal `error`, not queued for ingest."""
+    session.execute(text("""
+        UPDATE upload_file
+        SET status = 'error', status_message = :message, claim_token = NULL,
+            attempt_count = greatest(attempt_count, :attempt), updated_at = now()
+        WHERE file_id = :id AND status IN ('staged', 'uploading')"""),
+        {"id": file_id, "message": truncate_message(message), "attempt": attempt})
 
 
 def list_uploads(session: Session, organization_id: uuid.UUID) -> list[dict[str, object]]:

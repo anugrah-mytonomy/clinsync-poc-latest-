@@ -152,14 +152,16 @@ async function validateZipBuffer(file: File, config: UploadConfig): Promise<File
     const segments = entry.name.split('/').filter(Boolean);
     const fileName = segments[segments.length - 1];
     const depth = segments.length - 1;
+    const size = (entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize;
 
     if (depth > config.maxZipFolderDepth) {
       zipEntries.push({
         id: entry.name,
         path: entry.name,
         fileName,
+        size,
         valid: false,
-        error: 'Folders nested too deeply — at most one subfolder is supported', // the worker's reject reason, word for word
+        error: 'Nested folders are not allowed', // Add Content design §1.3: root or one folder only
       });
       continue;
     }
@@ -170,6 +172,7 @@ async function validateZipBuffer(file: File, config: UploadConfig): Promise<File
         id: entry.name,
         path: entry.name,
         fileName,
+        size,
         valid: false,
         error: extension ? `.${extension} is not supported inside a ZIP.` : 'Files without an extension are not supported.',
       });
@@ -185,20 +188,22 @@ async function validateZipBuffer(file: File, config: UploadConfig): Promise<File
         id: entry.name,
         path: entry.name,
         fileName,
+        size,
         valid: innerResult.valid,
         error: innerResult.errors[0],
       });
       continue;
     }
 
-    zipEntries.push({ id: entry.name, path: entry.name, fileName, valid: true });
+    zipEntries.push({ id: entry.name, path: entry.name, fileName, size, valid: true });
   }
 
   const warnings = zipEntries.filter((entry) => !entry.valid).map((entry) => `${entry.path}: ${entry.error}`);
 
   if (!zipEntries.some((entry) => entry.valid)) {
-    const allowed = config.allowedZipEntryExt.map((ext) => ext.toUpperCase()).join(', ');
-    return { valid: false, errors: [`The ZIP file does not contain any ${allowed} files that can be added.`], warnings, zipEntries };
+    const names = config.allowedZipEntryExt.map((ext) => ext.toUpperCase());
+    const allowed = names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names.join('');
+    return { valid: false, errors: [`ZIP contains no ${allowed} files`], warnings, zipEntries };
   }
 
   return { valid: true, errors: [], warnings, zipEntries };

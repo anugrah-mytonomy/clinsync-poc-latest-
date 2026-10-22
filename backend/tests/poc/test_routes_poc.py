@@ -14,7 +14,7 @@ from api.db import get_db_session
 from poc.main import app
 from tests.db_helpers import POC_USER
 
-MISSING = "ClinSync/incoming/x/missing.docx"
+MISSING = "clynsync/incoming/x/missing.docx"
 
 
 def fake_size(key: str) -> int | None:
@@ -41,7 +41,7 @@ def client(db_session: Session) -> Iterator[TestClient]:
 
 def seed(client: TestClient, *names: str) -> Any:
     """POST /poc/seed for objects named `names` under incoming/."""
-    return client.post("/poc/seed", json={"files": [{"file_name": n, "s3_key": f"ClinSync/incoming/x/{n}"}
+    return client.post("/poc/seed", json={"files": [{"file_name": n, "s3_key": f"clynsync/incoming/x/{n}"}
                                                     for n in names]})
 
 
@@ -68,7 +68,7 @@ def test_seed_creates_batch_and_staged_files(client: TestClient, db_session: Ses
 def test_seed_refuses_a_missing_object_with_400_and_writes_nothing(client: TestClient, db_session: Session) -> None:
     """An s3_key with no object behind it → 400 validation_error naming the key; no rows."""
     response = client.post("/poc/seed", json={"files": [
-        {"file_name": "valid.docx", "s3_key": "ClinSync/incoming/x/valid.docx"},
+        {"file_name": "valid.docx", "s3_key": "clynsync/incoming/x/valid.docx"},
         {"file_name": "missing.docx", "s3_key": MISSING}]})
     assert response.status_code == 400 and response.json()["error"]["code"] == "validation_error"
     assert MISSING in response.json()["error"]["message"]
@@ -76,11 +76,11 @@ def test_seed_refuses_a_missing_object_with_400_and_writes_nothing(client: TestC
 
 
 @pytest.mark.parametrize("files", [
-    [{"file_name": "notes.txt", "s3_key": "ClinSync/incoming/notes.txt"}],          # A3: not allowed
-    [{"file_name": "noext", "s3_key": "ClinSync/incoming/noext"}],
+    [{"file_name": "notes.txt", "s3_key": "clynsync/incoming/notes.txt"}],          # A3: not allowed
+    [{"file_name": "noext", "s3_key": "clynsync/incoming/noext"}],
     [{"file_name": "a.docx", "s3_key": "ClinSync/staging/a.docx"}],                 # not in incoming/
     [],
-    [{"file_name": "a.docx", "s3_key": "ClinSync/incoming/a.docx", "batch_id": "x"}],
+    [{"file_name": "a.docx", "s3_key": "clynsync/incoming/a.docx", "batch_id": "x"}],
 ])
 def test_seed_refuses_bad_input_with_400_and_writes_nothing(
     client: TestClient, db_session: Session, head: list[str], files: list[dict[str, Any]]

@@ -12,13 +12,13 @@ awslocal s3api put-bucket-lifecycle-configuration \
     "Rules": [
       {
         "ID": "expire-incoming",
-        "Filter": {"Prefix": "ClinSync/incoming/"},
+        "Filter": {"Prefix": "clynsync/incoming/"},
         "Status": "Enabled",
         "Expiration": {"Days": 1}
       },
       {
-        "ID": "expire-staging",
-        "Filter": {"Prefix": "ClinSync/staging/"},
+        "ID": "expire-processing",
+        "Filter": {"Prefix": "clynsync/processing/"},
         "Status": "Enabled",
         "Expiration": {"Days": 7}
       },

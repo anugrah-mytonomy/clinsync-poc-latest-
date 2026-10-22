@@ -1,0 +1,11 @@
+# Local runtime only. The image in docker-compose.yml (localstack/localstack:2026.8.4)
+# exits without LOCALSTACK_AUTH_TOKEN. 3.8 is the free image already on this machine
+# and provides the S3 the upload flow uses.
+services:
+  localstack:
+    image: localstack/localstack:3.8
+
+  frontend:
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules

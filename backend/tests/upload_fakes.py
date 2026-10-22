@@ -23,6 +23,7 @@ class FakeStorage:
     calls: list[str] = field(default_factory=list)
     copies: list[tuple[str, str]] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    sizes: dict[str, int] = field(default_factory=dict)                  # key -> object size, when a test sets it
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def create_multipart(self, key: str, content_type: str | None) -> str:
@@ -81,6 +82,17 @@ class FakeStorage:
         self.deleted.extend(batch)
         self.objects.difference_update(batch)
 
+    def object_size(self, key: str) -> int | None:
+        """The size set in sizes for a completed object (None when unset: the size check is skipped)."""
+        self.calls.append("object_size")
+        return self.sizes.get(key) if key in self.objects else None
+
+    def delete(self, key: str) -> None:
+        """Delete one object."""
+        self.calls.append("delete")
+        self.deleted.append(key)
+        self.objects.discard(key)
+
     def exists(self, key: str) -> bool:
         """True for a completed object."""
         self.calls.append("exists")
@@ -92,7 +104,7 @@ def fake_storage(monkeypatch: pytest.MonkeyPatch) -> FakeStorage:
     """Replace every api.storage call the Upload API makes with the in-memory fake."""
     fake = FakeStorage()
     for name in ("create_multipart", "presign_part", "list_parts", "complete_multipart", "abort_multipart", "exists",
-                 "copy", "delete_many"):
+                 "copy", "delete_many", "object_size", "delete"):
         monkeypatch.setattr(storage, name, getattr(fake, name))
     return fake
 
@@ -105,8 +117,8 @@ class Recorder:
         self.calls: list[tuple[str, str]] = []
         self._lock = threading.Lock()
 
-    def __call__(self, file_id: str, organization_id: str) -> None:
-        """Record one publish."""
+    def __call__(self, file_id: str, organization_id: str, **_: object) -> None:
+        """Record one publish; options such as countdown are accepted and ignored."""
         with self._lock:
             self.calls.append((file_id, organization_id))
 

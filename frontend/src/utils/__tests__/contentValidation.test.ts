@@ -55,14 +55,14 @@ describe('the zip check (D16)', () => {
     expect(result.errors).toEqual([]);
     expect(result.warnings).toEqual([
       'notes.pdf: .pdf is not supported inside a ZIP.',
-      'x/y/deep.docx: Folders nested too deeply — at most one subfolder is supported',
+      'x/y/deep.docx: Nested folders are not allowed',
     ]);
   });
 
   it('blocks a zip with no usable entry', async () => {
     const result = await validateUploadFile(await zipOf(['notes.pdf', '__MACOSX/._a.docx', 'x/y/deep.docx']), CONFIG);
     expect(result.valid).toBe(false);
-    expect(result.errors).toEqual(['The ZIP file does not contain any DOCX files that can be added.']);
+    expect(result.errors).toEqual(['ZIP contains no DOCX files']);
   });
 });
 

@@ -192,6 +192,30 @@ Paths and request bodies **exactly as in `upload_routes.py` today**. Task 0.2 re
 
 The Ingest POC's `confirm` also stays. The `/poc/seed` scenarios use it, and `complete` calls the same service.
 
+### 5.2a Content Library Upload API — `/clinsync/uploads/*`
+
+The Add Content / Uploading screens (Confluence "Content Library Upload — Frontend Design") call this API. It sits on
+the same services and tables as §5.1; `/api/uploads/*` stays for its existing callers. **Ids are UUID strings**, not
+the integers the Confluence page shows. Errors are `{"detail": …}` as in §5.1, except `complete`, which answers
+`{"error": {"code", "message", "request_id"}}`.
+
+| Endpoint | Request | Response / rules |
+|---|---|---|
+| `POST /clinsync/uploads/check-duplicates` | `{files: [{fileName, sizeBytes, entries?: [{fileName, sizeBytes}]}]}` (≥ 1 file) | `{matches: [{archiveName?, fileName, match: {fileId, sizeBytes, addedAt, version, specialties: [], documentType: null}}]}`. A match is a library document with the **same file name** (case-insensitive, extension included); size is not compared. A ZIP lists its entries' matches (with `archiveName`), not its own name |
+| `POST /clinsync/uploads/batches` | `{}` | `{batchId}` — a new `upload_batch` row, once per Upload click |
+| `POST /clinsync/uploads/initiate` | `{batchId, fileName, fileSize, contentType?, replace?, replacesDocumentId?, entries?}` | `{kind: "document" \| "archive", fileId, uploadId, partSize, parts: {"1": url, …}}`. 404 unknown batch · 409 batch committed/abandoned · 400 type · 413 over `MAX_UPLOAD_BYTES`, or a ZIP over 300 MB · 409 `Duplicate file — <name> has already been uploaded.` when the name is in the library and this is not a replace · 400 `An archive cannot replace a library document.` · 400 when `replace` and `replacesDocumentId` are not sent together · 404 unknown `replacesDocumentId`. `entries` is accepted and not stored. A replace stores `intent = 'replace'`, `replaces_document_id` on `upload_file` |
+| `POST /clinsync/uploads/{fileId}/complete` | `{uploadId, parts: [{partNumber, etag}]}` | `{fileId, status: "uploaded"}` — §5.3. Refusals `{"error": {code, message, request_id}}`: `upload_not_found` (404), `session_expired` / `invalid_parts` / `empty_parts` (400) |
+| `POST /clinsync/uploads/{fileId}/discard` | `{uploadId}` | Retry: aborts the multipart upload and deletes the file's row if it is `staged`, `uploading` or `error` and has no candidates; `{ok: true}`. The client then initiates again with the same `batchId` |
+
+**Replace at commit (§5.4).** A candidate whose file has `intent = 'replace'` does not insert: under the organization
+lock it locks the target document. Target gone → skipped *"The document to replace is no longer in the library"*.
+Same `content_hash` as the target → skipped *"Identical to the current version"*. Same content as **another** library
+document → skipped *"Already in the library"*. Otherwise the document keeps its id and title and moves to
+`current_version + 1`: new `file_name`, `size_bytes`, `content_hash`, `source_file_id`, `s3_key`
+(`…/{document_id}/v{n}_{file_name}`); the candidate is copied to the new key, and the previous version's object is
+deleted after `db.commit` — the prior version is not retained. The commit response gains
+`replaced: [{document_id, version, previous_version}]`.
+
 ### 5.3 `complete`, step by step
 
 ```python

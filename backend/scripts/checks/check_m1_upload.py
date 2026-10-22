@@ -80,15 +80,21 @@ def main() -> int:
             started = dict(zip(files, pool.map(initiate, files.items())))
         s.check("initiate statuses", sorted(st for st, _ in started.values()), [200, 200])
         uploads = {name: body for name, (_, body) in started.items()}
-        keys = [u["key"] for u in uploads.values()]
-        s.check("both initiates answered our batchId", {u["batchId"] for u in uploads.values()}, {batch_id})
+
+        def s3_key(file_id: str) -> str:
+            return lib.psql(f"SELECT s3_key FROM upload_file WHERE file_id = '{file_id}'").strip()
+
+        keys = [s3_key(u["fileId"]) for u in uploads.values()]
+        s.check("both initiates use our batch",
+                {lib.psql(f"SELECT batch_id FROM upload_file WHERE file_id = '{u['fileId']}'").strip()
+                 for u in uploads.values()}, {batch_id})
         s.check("parts per file", sorted(u["totalParts"] for u in uploads.values()), [1, 2])
 
         jobs = []
         for name, u in uploads.items():
             numbers = list(range(1, u["totalParts"] + 1))
             status, body = lib.api("POST", "/api/uploads/parts/presign",
-                                   {"key": u["key"], "uploadId": u["uploadId"], "partNumbers": numbers})
+                                   {"fileId": u["fileId"], "uploadId": u["uploadId"], "partNumbers": numbers})
             s.check(f"presign {name}", status, 200)
             hosts = {urllib.parse.urlsplit(url).netloc for url in body["urls"].values()}
             s.check(f"presigned host {name}", hosts, {"localhost:4566"})
@@ -104,7 +110,7 @@ def main() -> int:
         for name, u in uploads.items():
             parts = [{"partNumber": n, "etag": etag} for f, n, _, etag in results if f == name]
             status, body = lib.api("POST", "/api/uploads/complete", {
-                "id": u["id"], "fileId": u["fileId"], "key": u["key"], "uploadId": u["uploadId"], "filename": name,
+                "id": u["fileId"], "fileId": u["fileId"], "uploadId": u["uploadId"], "filename": name,
                 "fileSize": len(files[name]), "contentType": "application/octet-stream", "parts": parts})
             s.check(f"complete {name}", (status, body["status"], body["batchId"]), (200, "uploaded", batch_id))
 

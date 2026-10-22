@@ -100,7 +100,8 @@ def upload(name: str, data: bytes, content_type: str, prefix: str | None = None)
     if prefix is not None:
         api("list_parts", "GET", f"/api/uploads/{init['uploadId']}/parts?key={urllib.request.quote(init['key'])}",
             note="Defined on the server; the Client never calls it (its retry() resumes from in-memory ETags).")
-    return {"id": init["id"], "fileId": init["fileId"], "key": init["key"], "uploadId": init["uploadId"],
+    fid = init["fileId"]
+    return {"id": fid, "fileId": fid, "key": init["key"], "uploadId": init["uploadId"],
             "filename": name, "fileSize": len(data), "contentType": content_type, "parts": parts}
 
 

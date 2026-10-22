@@ -1,0 +1,362 @@
+[
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import { groupQueueDuplicates } from '@/utils/duplicateCheck';\nimport { getUploadableExtension, unsupportedFormatMessage, validateUploadFile } from '@/utils/contentValidation';",
+      "new_string": "import { groupQueueDuplicates } from '@/utils/duplicateCheck';\nimport { getUploadableExtension, unsupportedFormatMessage, validateUploadFile } from '@/utils/contentValidation';\nimport {\n  annotateZipQueueItems,\n  MAX_ZIP_FILE_BYTES,\n  prepareZipForUpload,\n  removeZipEntryFromItem,\n  uploadableZipEntries,\n} from '@/utils/zipUpload';"
+    }
+  },
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const items = useMemo(() => allItems.filter((item) => item.source === 'content-library'), [allItems]);",
+      "new_string": "  const items = useMemo(() => allItems.filter((item) => item.source === 'content-library'), [allItems]);\n  const displayItems = useMemo(() => annotateZipQueueItems(items), [items]);"
+    }
+  },
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "      else if (file.size === 0) errors.push('File is empty.');\n      else if (file.size > config.maxUploadBytes)\n        errors.push(`File exceeds the maximum size of ${formatBytes(config.maxUploadBytes)}.`);",
+      "new_string": "      else if (file.size === 0) errors.push('File is empty.');\n      else if (extension === 'zip' && file.size > MAX_ZIP_FILE_BYTES)\n        errors.push(`ZIP file exceeds the maximum size of ${formatBytes(MAX_ZIP_FILE_BYTES)}.`);\n      else if (file.size > config.maxUploadBytes)\n        errors.push(`File exceeds the maximum size of ${formatBytes(config.maxUploadBytes)}.`);"
+    }
+  },
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const duplicateGroups = useMemo(\n    () => groupQueueDuplicates(items.filter((item) => item.status !== 'validation-failed' && item.validation?.valid !== false)),\n    [items],\n  );",
+      "new_string": "  const duplicateGroups = useMemo(\n    () =>\n      groupQueueDuplicates(\n        displayItems.filter((item) => item.status !== 'validation-failed' && item.validation?.valid !== false),\n      ),\n    [displayItems],\n  );\n\n  const removeZipEntry = useCallback(\n    (zipId: string, entryId: string) => {\n      const item = items.find((row) => row.id === zipId);\n      if (!item) return;\n      const next = removeZipEntryFromItem(item, entryId);\n      updateItem(zipId, {\n        status: next.status,\n        validated: next.validated,\n        validation: next.validation,\n      });\n    },\n    [items, updateItem],\n  );"
+    }
+  },
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const startUpload = async (toUpload: UploadQueueItem[]) => {\n    const id = await getUploadBatchId();\n    clearItems((item) => item.source === 'content-library' && isBlockedFromUpload(item) && !item.cloudUpload);\n    for (const item of toUpload) updateItem(item.id, { replacesDocumentId: item.replacesDocumentId });\n    startCloudUploads(toUpload, id);",
+      "new_string": "  const startUpload = async (toUpload: UploadQueueItem[]) => {\n    const id = await getUploadBatchId();\n    clearItems((item) => item.source === 'content-library' && isBlockedFromUpload(item) && !item.cloudUpload);\n    const prepared = await Promise.all(\n      toUpload.map(async (item) => {\n        const current = items.find((row) => row.id === item.id) ?? item;\n        const annotated = annotateZipQueueItems([current])[0];\n        if (annotated.extension === 'zip') return prepareZipForUpload(annotated);\n        return annotated;\n      }),\n    );\n    for (const item of prepared) {\n      updateItem(item.id, {\n        replacesDocumentId: item.replacesDocumentId,\n        file: item.file,\n        size: item.size,\n        validation: item.validation,\n      });\n    }\n    startCloudUploads(prepared, id);"
+    }
+  },
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const upload = async () => {\n    const pending = items.filter(canStartCloudUpload);\n    if (pending.length === 0) return;\n    setUploadError(undefined);\n    setIsCheckingDuplicates(true);\n    try {\n      const answers = await checkDuplicates(\n        pending.map((item) => {\n          const payload: DuplicateCheckFile = {\n            filename: item.name,\n            fileSize: item.size,\n          };\n          if (item.extension === 'zip' && item.validation?.zipEntries?.length) {\n            payload.entries = item.validation.zipEntries.map((entry) => ({\n              filename: entry.path,\n              fileSize: entry.size,\n            }));\n          }\n          return payload;\n        }),\n      );\n      const list = buildConflicts(pending, answers);",
+      "new_string": "  const upload = async () => {\n    const pending = displayItems.filter(canStartCloudUpload);\n    if (pending.length === 0) return;\n    setUploadError(undefined);\n    setIsCheckingDuplicates(true);\n    try {\n      const answers = await checkDuplicates(\n        pending.map((item) => {\n          const payload: DuplicateCheckFile = {\n            filename: item.name,\n            fileSize: item.size,\n          };\n          const zipMembers = uploadableZipEntries(item.validation?.zipEntries);\n          if (item.extension === 'zip' && zipMembers.length > 0) {\n            payload.entries = zipMembers.map((entry) => ({\n              filename: entry.path,\n              fileSize: entry.size,\n            }));\n          }\n          return payload;\n        }),\n      );\n      const list = buildConflicts(pending, answers);"
+    }
+  },
+  {
+    "line": 21,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "          <AddContentStep\n            items={items}\n            duplicateGroups={duplicateGroups}\n            config={config}\n            onFilesSelected={addFiles}\n            onRemove={removeItem}\n            onKeepOne={keepOne}",
+      "new_string": "          <AddContentStep\n            items={displayItems}\n            duplicateGroups={duplicateGroups}\n            config={config}\n            onFilesSelected={addFiles}\n            onRemove={removeItem}\n            onRemoveZipEntry={removeZipEntry}\n            onKeepOne={keepOne}"
+    }
+  },
+  {
+    "line": 27,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const processNewItem = async (item: UploadQueueItem) => {\n    if (item.extension === 'zip') {\n      const result = await validateUploadFile(item.file, config);\n      if (!result.valid) {\n        applyValidationFailure(item.id, result.errors);\n        return;\n      }\n      updateItem(item.id, { validated: true, validation: result, status: 'queued' });\n      return;\n    }",
+      "new_string": "  const processNewItem = async (item: UploadQueueItem) => {\n    if (item.extension === 'zip') {\n      const result = await validateUploadFile(item.file, config);\n      updateItem(item.id, {\n        validated: true,\n        validation: result,\n        status: result.valid ? 'queued' : 'validation-failed',\n      });\n      return;\n    }"
+    }
+  },
+  {
+    "line": 28,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import {\n  annotateZipQueueItems,\n  MAX_ZIP_FILE_BYTES,\n  prepareZipForUpload,\n  removeZipEntryFromItem,\n  uploadableZipEntries,\n} from '@/utils/zipUpload';",
+      "new_string": "import {\n  annotateZipQueueItems,\n  isZipUploadItem,\n  MAX_ZIP_FILE_BYTES,\n  prepareZipForUpload,\n  removeZipEntryFromItem,\n  uploadableZipEntries,\n} from '@/utils/zipUpload';"
+    }
+  },
+  {
+    "line": 28,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  // Only local checks here: nothing is sent to the server until Upload is clicked.\n  const processNewItem = async (item: UploadQueueItem) => {\n    if (item.extension === 'zip') {",
+      "new_string": "  // Re-parse ZIPs that failed before we kept zipEntries on the queue item (older session state).\n  useEffect(() => {\n    for (const item of items) {\n      if (\n        isZipUploadItem(item) &&\n        item.validated &&\n        item.status === 'validation-failed' &&\n        !item.validation?.zipEntries?.length\n      ) {\n        void processNewItem({ ...item, validated: false, status: 'queued' });\n      }\n    }\n  }, [items]);\n\n  // Only local checks here: nothing is sent to the server until Upload is clicked.\n  const processNewItem = async (item: UploadQueueItem) => {\n    if (item.extension === 'zip') {"
+    }
+  },
+  {
+    "line": 30,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import { useCallback, useEffect, useMemo, useState } from 'react';",
+      "new_string": "import { useCallback, useEffect, useMemo, useRef, useState } from 'react';"
+    }
+  },
+  {
+    "line": 30,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  // ---- Add Content: validation --------------------------------------------------------------------------------\n  const applyValidationFailure = useCallback(\n    (id: string, errors: string[]) =>\n      updateItem(id, { validated: true, validation: { valid: false, errors }, status: 'validation-failed' }),\n    [updateItem],\n  );\n\n  // Re-parse ZIPs that failed before we kept zipEntries on the queue item (older session state).\n  useEffect(() => {\n    for (const item of items) {\n      if (\n        isZipUploadItem(item) &&\n        item.validated &&\n        item.status === 'validation-failed' &&\n        !item.validation?.zipEntries?.length\n      ) {\n        void processNewItem({ ...item, validated: false, status: 'queued' });\n      }\n    }\n  }, [items]);\n\n  // Only local checks here: nothing is sent to the server until Upload is clicked.\n  const processNewItem = async (item: UploadQueueItem) => {\n    if (item.extension === 'zip') {\n      const result = await validateUploadFile(item.file, config);\n      updateItem(item.id, {\n        validated: true,\n        validation: result,\n        status: result.valid ? 'queued' : 'validation-failed',\n      });\n      return;\n    }\n    updateItem(item.id, { validated: true, validation: { valid: true, errors: [] }, status: 'queued' });\n  };",
+      "new_string": "  // ---- Add Content: validation --------------------------------------------------------------------------------\n  const reparsedLegacyZipIds = useRef(new Set<string>());\n\n  const processNewItem = useCallback(\n    async (item: UploadQueueItem) => {\n      if (isZipUploadItem(item)) {\n        const result = await validateUploadFile(item.file, config);\n        updateItem(item.id, {\n          validated: true,\n          validation: result,\n          status: result.valid ? 'queued' : 'validation-failed',\n        });\n        return;\n      }\n      updateItem(item.id, { validated: true, validation: { valid: true, errors: [] }, status: 'queued' });\n    },\n    [config, updateItem],\n  );\n\n  // ZIPs validated before zipEntries were stored on the queue item \u2014 parse once so the accordion can list members.\n  useEffect(() => {\n    for (const item of items) {\n      if (reparsedLegacyZipIds.current.has(item.id)) continue;\n      if (\n        !isZipUploadItem(item) ||\n        !item.validated ||\n        item.status !== 'validation-failed' ||\n        (item.validation?.zipEntries?.length ?? 0) > 0\n      ) {\n        continue;\n      }\n      if (!item.validation?.errors?.some((message) => message.includes('does not contain'))) continue;\n      reparsedLegacyZipIds.current.add(item.id);\n      void processNewItem(item);\n    }\n  }, [items, processNewItem]);"
+    }
+  },
+  {
+    "line": 71,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import { groupQueueDuplicates } from '@/utils/duplicateCheck';",
+      "new_string": "import {\n  buildUploadDuplicateGroups,\n  type DuplicateCopy,\n  type UploadDuplicateGroup,\n} from '@/pages/content-library/uploadDuplicateGroups';"
+    }
+  },
+  {
+    "line": 71,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const duplicateGroups = useMemo(\n    () =>\n      groupQueueDuplicates(\n        displayItems.filter((item) => item.status !== 'validation-failed' && item.validation?.valid !== false),\n      ),\n    [displayItems],\n  );",
+      "new_string": "  const duplicateGroups = useMemo(() => buildUploadDuplicateGroups(displayItems), [displayItems]);"
+    }
+  },
+  {
+    "line": 71,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const keepOne = (group: UploadQueueItem[]) => {\n    for (const item of group.slice(1)) removeItem(item.id);\n  };",
+      "new_string": "  const removeDuplicateCopy = useCallback(\n    (copy: DuplicateCopy) => {\n      if (copy.kind === 'standalone') removeItem(copy.itemId);\n      else removeZipEntry(copy.zipId, copy.entryId);\n    },\n    [removeItem, removeZipEntry],\n  );\n\n  const keepOneDuplicateGroup = useCallback(\n    (group: UploadDuplicateGroup) => {\n      for (const copy of group.copies.slice(1)) removeDuplicateCopy(copy);\n    },\n    [removeDuplicateCopy],\n  );"
+    }
+  },
+  {
+    "line": 71,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "            onRemoveZipEntry={removeZipEntry}\n            onKeepOne={keepOne}",
+      "new_string": "            onRemoveZipEntry={removeZipEntry}\n            onRemoveDuplicateCopy={removeDuplicateCopy}\n            onKeepOneDuplicateGroup={keepOneDuplicateGroup}"
+    }
+  },
+  {
+    "line": 105,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  uploadableZipEntries,\n} from '@/utils/zipUpload';",
+      "new_string": "  logZipBackendManifest,\n  uploadableZipEntries,\n} from '@/utils/zipUpload';"
+    }
+  },
+  {
+    "line": 105,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "          const zipMembers = uploadableZipEntries(item.validation?.zipEntries);\n          if (item.extension === 'zip' && zipMembers.length > 0) {\n            payload.entries = zipMembers.map((entry) => ({\n              filename: entry.path,\n              fileSize: entry.size,\n            }));\n          }\n          return payload;",
+      "new_string": "          const zipMembers = uploadableZipEntries(item.validation?.zipEntries);\n          if (item.extension === 'zip' && zipMembers.length > 0) {\n            logZipBackendManifest('check-duplicates', item.name, zipMembers, {\n              archiveBytes: item.size,\n            });\n            payload.entries = zipMembers.map((entry) => ({\n              filename: entry.path,\n              fileSize: entry.size,\n            }));\n          }\n          return payload;"
+    }
+  },
+  {
+    "line": 108,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  logZipBackendManifest,\n  uploadableZipEntries,\n} from '@/utils/zipUpload';",
+      "new_string": "  uploadableZipEntries,\n} from '@/utils/zipUpload';"
+    }
+  },
+  {
+    "line": 108,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "          if (item.extension === 'zip' && zipMembers.length > 0) {\n            logZipBackendManifest('check-duplicates', item.name, zipMembers, {\n              archiveBytes: item.size,\n            });\n            payload.entries = zipMembers.map((entry) => ({",
+      "new_string": "          if (item.extension === 'zip' && zipMembers.length > 0) {\n            payload.entries = zipMembers.map((entry) => ({"
+    }
+  },
+  {
+    "line": 254,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "    const prepared = await Promise.all(\n      toUpload.map(async (item) => {\n        const current = items.find((row) => row.id === item.id) ?? item;\n        const annotated = annotateZipQueueItems([current])[0];",
+      "new_string": "    const prepared = await Promise.all(\n      toUpload.map(async (item) => {\n        // Merge queue row with `toUpload` so conflict resolutions (e.g. replacesDocumentId) are not dropped.\n        const queued = items.find((row) => row.id === item.id);\n        const current = { ...(queued ?? item), ...item };\n        const annotated = annotateZipQueueItems([current])[0];"
+    }
+  },
+  {
+    "line": 397,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import {\n  checkDuplicates,\n  type DuplicateCheckFile,\n  getUploadBatchId,\n  fetchLibraryDocuments,\n  getDownloadUrl,\n  type LibraryDocument,\n} from '@/utils/uploadsApi';",
+      "new_string": "import {\n  checkDuplicates,\n  type DuplicateCheckFile,\n  getUploadBatchId,\n  fetchLibraryDocuments,\n  getDownloadUrl,\n  type LibraryDocument,\n  pollBatchUploadStatus,\n  canContinueToTagging,\n  pickBatchFileForItem,\n  isTaggableServerStatus,\n  type BatchStatusLabel,\n} from '@/utils/uploadsApi';"
+    }
+  },
+  {
+    "line": 397,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const [batchId, setBatchId] = useState<string | null>(\n    () => items.find((item) => item.cloudUpload?.batchId)?.cloudUpload?.batchId ?? null,\n  );\n  const [step, setStep] = useState<Step>(() => (batchId ? 'uploading' : items.length > 0 ? 'add' : 'library'));",
+      "new_string": "  const [batchId, setBatchId] = useState<string | null>(\n    () => items.find((item) => item.cloudUpload?.batchId)?.cloudUpload?.batchId ?? null,\n  );\n  const [batchStatus, setBatchStatus] = useState<BatchStatusLabel | undefined>();\n  const [batchPolling, setBatchPolling] = useState(false);\n  const pollGeneration = useRef(0);\n  const [step, setStep] = useState<Step>(() => (batchId ? 'uploading' : items.length > 0 ? 'add' : 'library'));"
+    }
+  },
+  {
+    "line": 397,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  // ---- The uploaded batch: row state from each file's S3 upload (the server is not polled) ------------------\n  const batchItems = useMemo(\n    () => (batchId ? items.filter((item) => item.cloudUpload?.batchId === batchId) : []),\n    [items, batchId],\n  );\n\n  const rowStates = useMemo(() => {\n    const states: Record<string, UploadRowState> = {};\n    for (const item of batchItems) states[item.id] = uploadRowState(item);\n    return states;\n  }, [batchItems]);\n\n  // What goes on to tagging: every file that finished uploading.\n  const taggable = useMemo<TaggableDocument[]>(\n    () =>\n      batchItems\n        .filter((item) => rowStates[item.id]?.kind === 'done')\n        .map((item) => ({ id: item.id, name: documentName(item.name) })),\n    [batchItems, rowStates],\n  );",
+      "new_string": "  const applyBatchStatus = useCallback(\n    (status: { files: Parameters<typeof pickBatchFileForItem>[0] }) => {\n      setBatchStatus(status.batchStatus as BatchStatusLabel);\n      for (const item of itemsRef.current.filter((row) => row.cloudUpload?.batchId === batchId)) {\n        const file = pickBatchFileForItem(status.files, item);\n        if (!file) continue;\n        updateItem(item.id, {\n          cloudUpload: {\n            ...(item.cloudUpload ?? {\n              status: 'success',\n              uploadedBytes: item.size,\n              totalBytes: item.size,\n              percent: 100,\n            }),\n            fileId: file.fileId,\n            serverStatus: file.status,\n            serverMessage: file.statusMessage ?? undefined,\n            errorCode: file.errorCode ?? undefined,\n            zipChildren: file.children?.length ? file.children : undefined,\n          },\n        });\n      }\n    },\n    [batchId, updateItem],\n  );\n\n  const itemsRef = useRef(items);\n  itemsRef.current = items;\n\n  const onAllCompletesReported = useCallback(\n    (reportedBatchId: string) => {\n      const generation = (pollGeneration.current += 1);\n      setBatchPolling(true);\n      void pollBatchUploadStatus(reportedBatchId, (status) => {\n        if (generation !== pollGeneration.current) return;\n        applyBatchStatus(status);\n      })\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })\n        .finally(() => {\n          if (generation === pollGeneration.current) setBatchPolling(false);\n        });\n    },\n    [applyBatchStatus],\n  );\n\n  // ---- The uploaded batch: S3 progress, Complete, then batch status polling ----------------------------------\n  const batchItems = useMemo(\n    () => (batchId ? items.filter((item) => item.cloudUpload?.batchId === batchId) : []),\n    [items, batchId],\n  );\n\n  const rowStates = useMemo(() => {\n    const states: Record<string, UploadRowState> = {};\n    for (const item of batchItems) states[item.id] = uploadRowState(item);\n    return states;\n  }, [batchItems]);\n\n  const taggable = useMemo<TaggableDocument[]>(\n    () =>\n      batchItems\n        .filter((item) => isTaggableServerStatus(item.cloudUpload?.serverStatus))\n        .map((item) => ({ id: item.id, name: documentName(item.name) })),\n    [batchItems],\n  );\n\n  const canContinue =\n    !batchPolling &&\n    batchStatus !== 'in_progress' &&\n    canContinueToTagging(batchStatus) &&\n    taggable.length > 0;"
+    }
+  },
+  {
+    "line": 398,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  type BatchStatusLabel,\n} from '@/utils/uploadsApi';",
+      "new_string": "  type BatchStatusLabel,\n  type BatchUploadStatus,\n} from '@/utils/uploadsApi';"
+    }
+  },
+  {
+    "line": 398,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const applyBatchStatus = useCallback(\n    (status: { files: Parameters<typeof pickBatchFileForItem>[0] }) => {\n      setBatchStatus(status.batchStatus as BatchStatusLabel);\n      for (const item of itemsRef.current.filter((row) => row.cloudUpload?.batchId === batchId)) {\n        const file = pickBatchFileForItem(status.files, item);\n        if (!file) continue;\n        updateItem(item.id, {\n          cloudUpload: {\n            ...(item.cloudUpload ?? {\n              status: 'success',\n              uploadedBytes: item.size,\n              totalBytes: item.size,\n              percent: 100,\n            }),\n            fileId: file.fileId,\n            serverStatus: file.status,\n            serverMessage: file.statusMessage ?? undefined,\n            errorCode: file.errorCode ?? undefined,\n            zipChildren: file.children?.length ? file.children : undefined,\n          },\n        });\n      }\n    },\n    [batchId, updateItem],\n  );\n\n  const itemsRef = useRef(items);\n  itemsRef.current = items;",
+      "new_string": "  const itemsRef = useRef(items);\n  itemsRef.current = items;\n\n  const applyBatchStatus = useCallback(\n    (status: BatchUploadStatus) => {\n      setBatchStatus(status.batchStatus);\n      for (const item of itemsRef.current.filter((row) => row.cloudUpload?.batchId === status.batchId)) {\n        const file = pickBatchFileForItem(status.files, item);\n        if (!file) continue;\n        updateItem(item.id, {\n          cloudUpload: {\n            ...(item.cloudUpload ?? {\n              status: 'success',\n              uploadedBytes: item.size,\n              totalBytes: item.size,\n              percent: 100,\n            }),\n            fileId: file.fileId,\n            serverStatus: file.status,\n            serverMessage: file.statusMessage ?? undefined,\n            errorCode: file.errorCode ?? undefined,\n            zipChildren: file.children?.length ? file.children : undefined,\n          },\n        });\n      }\n    },\n    [updateItem],\n  );"
+    }
+  },
+  {
+    "line": 398,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "    startCloudUploads(prepared, id);\n    setBatchId(id);\n    setStep('uploading');\n  };",
+      "new_string": "    setBatchStatus(undefined);\n    startCloudUploads(prepared, id, onAllCompletesReported);\n    setBatchId(id);\n    setStep('uploading');\n  };"
+    }
+  },
+  {
+    "line": 398,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "          <UploadingStep\n            items={batchItems}\n            rowStates={rowStates}\n            readyCount={taggable.length}\n            onRetry={retryCloudUpload}\n            onContinue={() => setStep('tagging')}\n            onBackToLibrary={backToLibrary}\n          />",
+      "new_string": "          <UploadingStep\n            items={batchItems}\n            rowStates={rowStates}\n            readyCount={taggable.length}\n            canContinue={canContinue}\n            batchPolling={batchPolling}\n            onRetry={(id) => retryCloudUpload(id, onAllCompletesReported)}\n            onContinue={() => setStep('tagging')}\n            onBackToLibrary={backToLibrary}\n          />"
+    }
+  },
+  {
+    "line": 416,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  pollBatchUploadStatus,\n  canContinueToTagging,\n  pickBatchFileForItem,\n  isTaggableServerStatus,\n  type BatchStatusLabel,\n  type BatchUploadStatus,\n} from '@/utils/uploadsApi';",
+      "new_string": "  canContinueToTagging,\n  pickBatchFileForItem,\n  isTaggableServerStatus,\n  type BatchStatusLabel,\n} from '@/utils/uploadsApi';\nimport { pollBatchUploadStatus, type BatchUploadStatus } from '@/utils/batchUploadStatus';"
+    }
+  },
+  {
+    "line": 427,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const [batchStatus, setBatchStatus] = useState<BatchStatusLabel | undefined>();\n  const [batchPolling, setBatchPolling] = useState(false);",
+      "new_string": "  const [batchStatus, setBatchStatus] = useState<BatchStatusLabel | undefined>();\n  const [batchPolling, setBatchPolling] = useState(false);\n  const [batchPollError, setBatchPollError] = useState<string | undefined>();"
+    }
+  },
+  {
+    "line": 427,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const onAllCompletesReported = useCallback(\n    (reportedBatchId: string) => {\n      const generation = (pollGeneration.current += 1);\n      setBatchPolling(true);\n      void pollBatchUploadStatus(reportedBatchId, (status) => {\n        if (generation !== pollGeneration.current) return;\n        applyBatchStatus(status);\n      })\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })\n        .finally(() => {\n          if (generation === pollGeneration.current) setBatchPolling(false);\n        });\n    },\n    [applyBatchStatus],\n  );",
+      "new_string": "  const onAllCompletesReported = useCallback(\n    (reportedBatchId: string) => {\n      const generation = (pollGeneration.current += 1);\n      setBatchPollError(undefined);\n      setBatchPolling(true);\n      void pollBatchUploadStatus(reportedBatchId, (status) => {\n        if (generation !== pollGeneration.current) return;\n        applyBatchStatus(status);\n      })\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })\n        .catch((err: unknown) => {\n          if (generation !== pollGeneration.current) return;\n          setBatchPollError(err instanceof Error ? err.message : 'Could not load batch status.');\n        })\n        .finally(() => {\n          if (generation === pollGeneration.current) setBatchPolling(false);\n        });\n    },\n    [applyBatchStatus],\n  );"
+    }
+  },
+  {
+    "line": 427,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "    setBatchStatus(undefined);\n    startCloudUploads(prepared, id, onAllCompletesReported);",
+      "new_string": "    setBatchStatus(undefined);\n    setBatchPollError(undefined);\n    startCloudUploads(prepared, id, onAllCompletesReported);"
+    }
+  },
+  {
+    "line": 427,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "          <UploadingStep\n            items={batchItems}\n            rowStates={rowStates}\n            readyCount={taggable.length}\n            canContinue={canContinue}\n            batchPolling={batchPolling}\n            onRetry={(id) => retryCloudUpload(id, onAllCompletesReported)}",
+      "new_string": "          {batchPollError && (\n            <p role=\"alert\" className=\"mx-lg mt-md rounded-lg border border-danger/20 bg-danger/5 px-md py-sm text-sm text-danger\">\n              {batchPollError} Rebuild the API container if this endpoint is missing:{' '}\n              <code className=\"text-xs\">docker compose build api &amp;&amp; docker compose up -d api</code>\n            </p>\n          )}\n          <UploadingStep\n            items={batchItems}\n            rowStates={rowStates}\n            readyCount={taggable.length}\n            canContinue={canContinue}\n            batchPolling={batchPolling}\n            onRetry={(id) => retryCloudUpload(id, onAllCompletesReported)}"
+    }
+  },
+  {
+    "line": 471,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import { pollBatchUploadStatus, type BatchUploadStatus } from '@/utils/batchUploadStatus';",
+      "new_string": "import { fetchBatchUploadStatus, type BatchUploadStatus } from '@/utils/batchUploadStatus';"
+    }
+  },
+  {
+    "line": 471,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "      void pollBatchUploadStatus(reportedBatchId, (status) => {\n        if (generation !== pollGeneration.current) return;\n        applyBatchStatus(status);\n      })\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })",
+      "new_string": "      void fetchBatchUploadStatus(reportedBatchId)\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })"
+    }
+  },
+  {
+    "line": 471,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  // ---- The uploaded batch: S3 progress, Complete, then batch status polling ----------------------------------",
+      "new_string": "  // ---- The uploaded batch: S3 progress, Complete, then one GET batch status (no worker polling) ------------"
+    }
+  },
+  {
+    "line": 480,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import { fetchBatchUploadStatus, type BatchUploadStatus } from '@/utils/batchUploadStatus';",
+      "new_string": "import { pollUntilBatchUploaded, type BatchUploadStatus } from '@/utils/batchUploadStatus';"
+    }
+  },
+  {
+    "line": 480,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "      void fetchBatchUploadStatus(reportedBatchId)\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })",
+      "new_string": "      void pollUntilBatchUploaded(reportedBatchId, (status) => {\n        if (generation !== pollGeneration.current) return;\n        applyBatchStatus(status);\n      })\n        .then((status) => {\n          if (generation !== pollGeneration.current) return;\n          applyBatchStatus(status);\n        })"
+    }
+  },
+  {
+    "line": 480,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  // ---- The uploaded batch: S3 progress, Complete, then one GET batch status (no worker polling) ------------",
+      "new_string": "  // ---- The uploaded batch: Complete, then short poll until API reports `uploaded` (not ingest) ------------"
+    }
+  },
+  {
+    "line": 486,
+    "name": "StrReplace",
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  // ---- The uploaded batch: Complete, then short poll until API reports `uploaded` (not ingest) ------------",
+      "new_string": "  // ---- The uploaded batch: Complete, then poll until API reports `processed` for UI \u201cUploaded\u201d ------------"
+    }
+  }
+]

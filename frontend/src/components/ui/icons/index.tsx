@@ -184,6 +184,48 @@ const CloudIcon = (props: IconProps) => {
   );
 };
 
+const CloudUploadIcon = (props: IconProps) => {
+  return (
+    <OutlineIcon {...props}>
+      <path d="M7 18a4.5 4.5 0 0 1-.6-8.96A5.5 5.5 0 0 1 17.4 8.02 4 4 0 0 1 17 18" />
+      <path d="M12 20v-8M9 15l3-3 3 3" />
+    </OutlineIcon>
+  );
+};
+
+const ChevronDownIcon = (props: IconProps) => {
+  return (
+    <OutlineIcon {...props}>
+      <path d="M6 9l6 6 6-6" />
+    </OutlineIcon>
+  );
+};
+
+const ChevronLeftIcon = (props: IconProps) => {
+  return (
+    <OutlineIcon {...props}>
+      <path d="M15 18l-6-6 6-6" />
+    </OutlineIcon>
+  );
+};
+
+const XCircleIcon = (props: IconProps) => {
+  return (
+    <OutlineIcon {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M15 9l-6 6M9 9l6 6" />
+    </OutlineIcon>
+  );
+};
+
+const CloseIcon = (props: IconProps) => {
+  return (
+    <OutlineIcon {...props}>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </OutlineIcon>
+  );
+};
+
 const MytonomyMarkIcon = (props: IconProps) => {
   return (
     <svg
@@ -203,7 +245,11 @@ const MytonomyMarkIcon = (props: IconProps) => {
 export {
   AlertIcon,
   CheckCircleIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  CloseIcon,
   CloudIcon,
+  CloudUploadIcon,
   ContentLibraryIcon,
   DashboardIcon,
   DocumentIcon,
@@ -218,4 +264,5 @@ export {
   TrashIcon,
   UploadIcon,
   VideoIcon,
+  XCircleIcon,
 };

@@ -1,7 +1,7 @@
 """Anugrah's Upload API, /api/uploads/* (upload-ingest-merge design.md §5.1), on the Ingest internals.
 
 Paths, request bodies and response fields are exactly those of the Upload POC's upload_routes.py, recorded in
-tests/api/fixtures/upload_api/; the only additions are the optional `batchId` in initiate and `batchId` in its response.
+tests/api/fixtures/upload_api/; additions: optional `batchId` on initiate request, `getBatchId`, `batchId` on complete (not on initiate response).
 Errors keep FastAPI's {"detail": "…"} body (D14) — routes/errors.py chooses the body by path.
 """
 import uuid
@@ -10,10 +10,12 @@ from datetime import datetime
 from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from api.db import get_db_session
+from api.repositories import documents
 from api.services import uploads
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -26,6 +28,28 @@ def _answer(call: Callable[[], T]) -> T:
         return call()
     except uploads.UploadRefused as exc:
         raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
+
+
+def _complete_refusal_code(detail: str, status: int) -> str:
+    """Machine-readable code for POST /{file_id}/complete refusals."""
+    lower = detail.lower()
+    if "duplicate" in lower:
+        return "duplicate_file"
+    if "expired" in lower:
+        return "session_expired"
+    if "bytes" in lower and "expected" in lower:
+        return "size_mismatch"
+    if status == 404:
+        return "not_found"
+    return "upload_rejected"
+
+
+def _complete_error_response(status: int, code: str, message: str) -> JSONResponse:
+    """ClinSync-style error body for per-file complete."""
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"code": code, "message": message, "details": [], "request_id": str(uuid.uuid4())}},
+    )
 
 
 # ── check-duplicate ─────────────────────────────────────────────────────────
@@ -64,7 +88,7 @@ class InitiateRequest(BaseModel):
 
 
 class InitiateResponse(BaseModel):
-    """Anugrah's fields, plus batchId."""
+    """Anugrah's fields; batchId comes from getBatchId / the initiate request, not this response."""
 
     id: str
     fileId: str
@@ -72,7 +96,6 @@ class InitiateResponse(BaseModel):
     key: str
     partSize: int
     totalParts: int
-    batchId: str
 
 
 @router.post("/initiate", response_model=InitiateResponse)
@@ -81,16 +104,15 @@ def initiate(body: InitiateRequest, db: Session = Depends(get_db_session)) -> In
     started = _answer(lambda: uploads.initiate(db, filename=body.filename, file_size=body.fileSize,
                                                content_type=body.contentType, batch_id=body.batchId))
     return InitiateResponse(id=str(started.file_id), fileId=str(started.file_id), uploadId=started.upload_id,
-                            key=started.key, partSize=started.part_size, totalParts=started.total_parts,
-                            batchId=str(started.batch_id))
+                            key=started.key, partSize=started.part_size, totalParts=started.total_parts)
 
 
 # ── parts/presign and parts ─────────────────────────────────────────────────
 
 class PresignRequest(BaseModel):
-    """Anugrah's body: which parts of which upload."""
+    """Which parts of which upload (identified by fileId + uploadId from initiate)."""
 
-    key: str
+    fileId: uuid.UUID
     uploadId: str
     partNumbers: list[int]
 
@@ -103,8 +125,8 @@ class PresignResponse(BaseModel):
 
 @router.post("/parts/presign", response_model=PresignResponse)
 def presign(body: PresignRequest, db: Session = Depends(get_db_session)) -> PresignResponse:
-    """Presign part uploads for the browser; 404 for an unknown key + uploadId pair, 409 past uploading (U2)."""
-    return PresignResponse(urls=_answer(lambda: uploads.presign(db, key=body.key, upload_id=body.uploadId,
+    """Presign part uploads for the browser; 404 for an unknown fileId + uploadId pair, 409 past uploading (U2)."""
+    return PresignResponse(urls=_answer(lambda: uploads.presign(db, file_id=body.fileId, upload_id=body.uploadId,
                                                                 part_numbers=body.partNumbers)))
 
 
@@ -123,25 +145,25 @@ class ListPartsResponse(BaseModel):
 
 
 @router.get("/{upload_id}/parts", response_model=ListPartsResponse)
-def list_parts(upload_id: str, key: str, db: Session = Depends(get_db_session)) -> ListPartsResponse:
+def list_parts(upload_id: str, fileId: uuid.UUID, db: Session = Depends(get_db_session)) -> ListPartsResponse:
     """Parts already in S3, for resuming after a refresh (U2.1)."""
     return ListPartsResponse(parts=[UploadedPart(**p) for p in
-                                    _answer(lambda: uploads.parts(db, key=key, upload_id=upload_id))])
+                                    _answer(lambda: uploads.parts(db, file_id=fileId, upload_id=upload_id))])
 
 
 # ── abort and the upload list ───────────────────────────────────────────────
 
 class AbortRequest(BaseModel):
-    """Anugrah's body: which multipart upload."""
+    """Which multipart upload to cancel (fileId + uploadId from initiate)."""
 
-    key: str
+    fileId: uuid.UUID
     uploadId: str
 
 
 @router.post("/abort")
 def abort(body: AbortRequest, db: Session = Depends(get_db_session)) -> dict[str, bool]:
     """Cancel a staged or uploading file; for a later status, change nothing (D15). Always {"ok": true}."""
-    _answer(lambda: uploads.abort(db, key=body.key, upload_id=body.uploadId))
+    _answer(lambda: uploads.abort(db, file_id=body.fileId, upload_id=body.uploadId))
     return {"ok": True}
 
 
@@ -176,11 +198,10 @@ class PartInput(BaseModel):
 
 
 class CompleteRequest(BaseModel):
-    """Anugrah's body, unchanged; id, fileId, filename, fileSize and contentType are accepted, not needed."""
+    """Finish one multipart upload; fileId + uploadId locate the row (key is resolved server-side)."""
 
     id: str | None = None
-    fileId: str | None = None
-    key: str
+    fileId: uuid.UUID
     uploadId: str
     filename: str
     fileSize: int = Field(gt=0)
@@ -201,7 +222,7 @@ class CompleteResponse(BaseModel):
 @router.post("/complete", response_model=CompleteResponse)
 def complete(body: CompleteRequest, db: Session = Depends(get_db_session)) -> CompleteResponse:
     """Complete the S3 upload and hand the file to the Ingest pipeline, as confirm does (U3)."""
-    done = _answer(lambda: uploads.complete(db, key=body.key, upload_id=body.uploadId,
+    done = _answer(lambda: uploads.complete(db, file_id=body.fileId, upload_id=body.uploadId,
                                             parts=[p.model_dump() for p in body.parts]))
     return CompleteResponse(id=str(done.file_id), location=done.location, key=done.key, status=done.status,
                             batchId=str(done.batch_id))

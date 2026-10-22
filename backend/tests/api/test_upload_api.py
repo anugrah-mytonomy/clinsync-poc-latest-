@@ -40,6 +40,28 @@ def initiate(client: TestClient, filename: str = "valid.docx", size: int = 1000,
                                                        "contentType": "application/octet-stream", **extra})
 
 
+def batch_id_from_key(key: str) -> str:
+    """Batch id embedded in clynsync/incoming/{batchId}/{fileId}_name."""
+    return key.split("/")[2]
+
+
+def upload_row(db: Session, body: dict[str, Any]) -> dict[str, Any]:
+    """The upload_file row for an initiate response body."""
+    return dict(db.execute(text("SELECT batch_id, s3_key FROM upload_file WHERE file_id = :f"),
+                           {"f": body["fileId"]}).mappings().one())
+
+
+def batch_id_from_key(key: str) -> str:
+    """Batch id embedded in clynsync/incoming/{batchId}/{fileId}_name."""
+    return key.split("/")[2]
+
+
+def upload_row(db: Session, body: dict[str, Any]) -> dict[str, Any]:
+    """The upload_file row for an initiate response body."""
+    return dict(db.execute(text("SELECT batch_id, s3_key FROM upload_file WHERE file_id = :f"),
+                           {"f": body["fileId"]}).mappings().one())
+
+
 def batch_files(db: Session, batch_id: str) -> list[dict[str, Any]]:
     """The batch's upload_file rows, oldest first, then by name (one test transaction shares created_at)."""
     return [dict(r) for r in db.execute(text("SELECT * FROM upload_file WHERE batch_id = :b "
@@ -50,22 +72,26 @@ def batch_files(db: Session, batch_id: str) -> list[dict[str, Any]]:
 
 def test_initiate_creates_a_staged_row_and_a_multipart_upload(client: TestClient, db_session: Session,
                                                               fake_storage: FakeStorage) -> None:  # noqa: F811
-    """The row is staged with size, type, upload id and key; the multipart upload exists at that key (U1.3)."""
+    """The row is uploading with size, type, upload id and key; multipart exists; initiate returns part URLs (U1.3)."""
     body = initiate(client, "Mixed Docs.ZIP", 12 * MIB).json()
-    (row,) = batch_files(db_session, body["batchId"])
+    meta = upload_row(db_session, body)
+    batch_id = str(meta["batch_id"])
+    s3_key = meta["s3_key"]
+    (row,) = batch_files(db_session, batch_id)
     assert (row["status"], row["file_name"], row["file_ext"], row["is_archive"]) == \
-        ("staged", "Mixed Docs.ZIP", "zip", True)
+        ("uploading", "Mixed Docs.ZIP", "zip", True)
     assert (row["size_bytes"], row["content_type"], row["organization_id"]) == \
         (12 * MIB, "application/octet-stream", POC_ORG)
-    assert (str(row["file_id"]), row["upload_id"], row["s3_key"]) == (body["id"], body["uploadId"], body["key"])
-    assert fake_storage.keys[body["uploadId"]] == body["key"]
-    assert body["key"] == f"ClinSync/incoming/{POC_ORG}/{body['batchId']}/{body['id']}_Mixed Docs.ZIP"
+    assert (str(row["file_id"]), row["upload_id"], row["s3_key"]) == (body["fileId"], body["uploadId"], s3_key)
+    assert fake_storage.keys[body["uploadId"]] == s3_key
+    assert s3_key == f"clynsync/incoming/{batch_id}/{body['fileId']}_Mixed Docs.ZIP"
 
 
-def test_the_server_builds_the_key_from_the_file_name_only(client: TestClient) -> None:
+def test_the_server_builds_the_key_from_the_file_name_only(client: TestClient, db_session: Session) -> None:
     """A path in the file name cannot steer the key (U1.6): only its last segment is used."""
     body = initiate(client, "../../etc/evil.docx").json()
-    assert body["key"].endswith(f"/{body['id']}_evil.docx") and ".." not in body["key"]
+    s3_key = upload_row(db_session, body)["s3_key"]
+    assert s3_key.endswith(f"/{body['fileId']}_evil.docx") and ".." not in s3_key
 
 
 @pytest.mark.parametrize(("size", "parts"), [(1, 1), (8 * MIB, 1), (8 * MIB + 1, 2), (20 * MIB, 3)])
@@ -73,6 +99,7 @@ def test_part_count_is_the_size_over_the_part_size(client: TestClient, size: int
     """partSize is UPLOAD_PART_SIZE_BYTES (8 MiB); totalParts rounds up."""
     body = initiate(client, size=size).json()
     assert (body["partSize"], body["totalParts"]) == (8 * MIB, parts)
+    assert set(body["parts"]) == {str(n) for n in range(1, parts + 1)}
 
 
 def test_disallowed_type_is_400_with_the_default_settings(client: TestClient, db_session: Session,
@@ -89,7 +116,7 @@ def test_pdf_is_allowed_with_the_default_settings(client: TestClient, db_session
     response = initiate(client, "Discharge Guide.pdf")
     assert response.status_code == 200, response.text
     row = db_session.execute(text("SELECT file_ext, is_archive, status FROM upload_file")).one()
-    assert (row.file_ext, row.is_archive, row.status) == ("pdf", False, "staged")
+    assert (row.file_ext, row.is_archive, row.status) == ("pdf", False, "uploading")
 
 
 def test_a_failed_insert_aborts_the_multipart_upload(client: TestClient, fake_storage: FakeStorage,  # noqa: F811
@@ -137,17 +164,17 @@ def test_no_poc_organization_is_503(client: TestClient, monkeypatch: pytest.Monk
 
 # ── 3.1 batches (D4) ───────────────────────────────────────────────────────
 
-def test_without_a_batch_id_every_initiate_makes_a_new_batch(client: TestClient) -> None:
+def test_without_a_batch_id_every_initiate_makes_a_new_batch(client: TestClient, db_session: Session) -> None:
     """Old calls without batchId still work: each gets its own new batch (U1.2)."""
     first, second = initiate(client).json(), initiate(client, "b.docx").json()
-    assert first["batchId"] != second["batchId"]
+    assert upload_row(db_session, first)["batch_id"] != upload_row(db_session, second)["batch_id"]
 
 
 def test_initiates_with_one_batch_id_share_the_batch(client: TestClient, db_session: Session) -> None:
     """The first sight creates the batch, the next joins it; the batch is the POC org's, created by POC_USER_ID."""
     batch_id = str(uuid.uuid4())
     responses = [initiate(client, name, batchId=batch_id).json() for name in ("a.docx", "b.docx", "c.zip")]
-    assert {r["batchId"] for r in responses} == {batch_id}
+    assert {str(upload_row(db_session, r)["batch_id"]) for r in responses} == {batch_id}
     assert [f["file_name"] for f in batch_files(db_session, batch_id)] == ["a.docx", "b.docx", "c.zip"]
     batch = db_session.execute(text("SELECT organization_id, created_by, status FROM upload_batch "
                                     "WHERE batch_id = :b"), {"b": batch_id}).one()
@@ -158,7 +185,7 @@ def test_initiates_with_one_batch_id_share_the_batch(client: TestClient, db_sess
 def test_a_closed_batch_is_409_and_nothing_is_started(client: TestClient, db_session: Session,
                                                       fake_storage: FakeStorage, status: str) -> None:  # noqa: F811
     """Joining a committed or abandoned batch → 409 with the detail body; no multipart upload, no row."""
-    batch_id = initiate(client).json()["batchId"]
+    batch_id = str(upload_row(db_session, initiate(client).json())["batch_id"])
     db_session.execute(text("UPDATE upload_batch SET status = :s WHERE batch_id = :b"), {"s": status, "b": batch_id})
     db_session.commit()
     calls_before = list(fake_storage.calls)
@@ -243,32 +270,33 @@ REAL_PRESIGN = storage.presign_part                       # captured before the 
 
 
 def presign(client: TestClient, body: dict[str, Any], parts: list[int]) -> Any:
-    """POST parts/presign for an initiate response's key and uploadId."""
+    """POST parts/presign for an initiate response's fileId and uploadId."""
     return client.post("/api/uploads/parts/presign",
-                       json={"key": body["key"], "uploadId": body["uploadId"], "partNumbers": parts})
+                       json={"fileId": body["fileId"], "uploadId": body["uploadId"], "partNumbers": parts})
 
 
 def status_of(db: Session, body: dict[str, Any]) -> str:
     """The file's status now."""
-    return db.execute(text("SELECT status FROM upload_file WHERE file_id = :id"), {"id": body["id"]}).scalar_one()
+    return db.execute(text("SELECT status FROM upload_file WHERE file_id = :id"), {"id": body["fileId"]}).scalar_one()
 
 
 def test_first_presign_moves_staged_to_uploading(client: TestClient, db_session: Session) -> None:
     """staged → uploading on the first presign (U1.3); a second presign keeps it uploading."""
     body = initiate(client, size=20 * MIB).json()
-    assert status_of(db_session, body) == "staged"
+    assert status_of(db_session, body) == "uploading"
     assert presign(client, body, [1, 2]).status_code == 200
     assert status_of(db_session, body) == "uploading"
     assert presign(client, body, [3]).status_code == 200 and status_of(db_session, body) == "uploading"
 
 
-@pytest.mark.parametrize("wrong", ["key", "uploadId"])
+@pytest.mark.parametrize("wrong", ["fileId", "uploadId"])
 def test_presign_refuses_a_pair_matching_no_row(client: TestClient, wrong: str) -> None:
-    """Both halves must match one row (U2.2): a right key with another uploadId, or the reverse, is 404."""
+    """Both halves must match one row (U2.2): a right fileId with another uploadId, or the reverse, is 404."""
     body = initiate(client).json()
+    bad_file = "00000000-0000-4000-8000-000000000099" if wrong == "fileId" else body["fileId"]
+    bad_upload = "other" if wrong == "uploadId" else body["uploadId"]
     response = client.post("/api/uploads/parts/presign",
-                           json={"key": body["key"], "uploadId": body["uploadId"], wrong: "other",
-                                 "partNumbers": [1]})
+                           json={"fileId": bad_file, "uploadId": bad_upload, "partNumbers": [1]})
     assert response.status_code == 404 and response.json() == {"detail": "Upload not found."}
 
 
@@ -276,14 +304,15 @@ def test_presign_refuses_a_pair_matching_no_row(client: TestClient, wrong: str) 
 def test_presign_refuses_a_file_past_uploading(client: TestClient, db_session: Session, status: str) -> None:
     """A file no longer awaiting parts → 409 with Anugrah's text; its status is unchanged."""
     body = initiate(client).json()
-    db_session.execute(text("UPDATE upload_file SET status = :s WHERE file_id = :id"), {"s": status, "id": body["id"]})
+    db_session.execute(text("UPDATE upload_file SET status = :s WHERE file_id = :id"), {"s": status, "id": body["fileId"]})
     db_session.commit()
     response = presign(client, body, [1])
     assert response.status_code == 409 and response.json() == {"detail": "Upload is not awaiting completion."}
     assert status_of(db_session, body) == status
 
 
-def test_presigned_urls_name_the_public_host(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_presigned_urls_name_the_public_host(client: TestClient, db_session: Session,
+                                             monkeypatch: pytest.MonkeyPatch) -> None:
     """With the real presign (no network needed), every URL is on S3_PUBLIC_ENDPOINT_URL, not the internal host."""
     monkeypatch.setenv("S3_PUBLIC_ENDPOINT_URL", "http://localhost:4566")
     monkeypatch.setenv("AWS_ENDPOINT_URL", "http://localstack:4566")
@@ -297,17 +326,18 @@ def test_presigned_urls_name_the_public_host(client: TestClient, monkeypatch: py
         for cached in (get_settings, storage.public_client, storage.internal_client):
             cached.cache_clear()
     assert sorted(urls) == ["1", "2", "3"]
-    assert all(u.startswith(f"http://localhost:4566/{get_settings().S3_BUCKET}/{body['key']}?") for u in urls.values())
+    s3_key = upload_row(db_session, body)["s3_key"]
+    assert all(u.startswith(f"http://localhost:4566/{get_settings().S3_BUCKET}/{s3_key}?") for u in urls.values())
 
 
 def test_list_parts_checks_the_pair_and_status(client: TestClient, db_session: Session) -> None:
     """GET …/parts: 404 for an unknown pair, 409 for a file past uploading — the same row check as presign."""
     body = initiate(client).json()
-    unknown = client.get("/api/uploads/other/parts", params={"key": body["key"]})
+    unknown = client.get("/api/uploads/other/parts", params={"fileId": body["fileId"]})
     assert unknown.status_code == 404 and unknown.json() == {"detail": "Upload not found."}
-    db_session.execute(text("UPDATE upload_file SET status = 'uploaded' WHERE file_id = :id"), {"id": body["id"]})
+    db_session.execute(text("UPDATE upload_file SET status = 'uploaded' WHERE file_id = :id"), {"id": body["fileId"]})
     db_session.commit()
-    past = client.get(f"/api/uploads/{body['uploadId']}/parts", params={"key": body["key"]})
+    past = client.get(f"/api/uploads/{body['uploadId']}/parts", params={"fileId": body["fileId"]})
     assert past.status_code == 409 and past.json() == {"detail": "Upload is not awaiting completion."}
 
 
@@ -316,15 +346,15 @@ def test_list_parts_of_an_upload_s3_no_longer_has_is_404(client: TestClient, fak
     """S3 lost the multipart upload (lifecycle expiry) → 404 "S3 error (NoSuchUpload): …", as Anugrah's API."""
     body = initiate(client).json()
     fake_storage.uploads.pop(body["uploadId"])
-    response = client.get(f"/api/uploads/{body['uploadId']}/parts", params={"key": body["key"]})
+    response = client.get(f"/api/uploads/{body['uploadId']}/parts", params={"fileId": body["fileId"]})
     assert response.status_code == 404 and response.json()["detail"].startswith("S3 error (NoSuchUpload): ")
 
 
 # ── 3.3 abort (U4.1, D15) and GET /api/uploads (U4.2) ──────────────────────
 
 def abort(client: TestClient, body: dict[str, Any]) -> Any:
-    """POST abort for an initiate response's key and uploadId."""
-    return client.post("/api/uploads/abort", json={"key": body["key"], "uploadId": body["uploadId"]})
+    """POST abort for an initiate response's fileId and uploadId."""
+    return client.post("/api/uploads/abort", json={"fileId": body["fileId"], "uploadId": body["uploadId"]})
 
 
 @pytest.mark.parametrize("presigned", [False, True], ids=["staged", "uploading"])
@@ -337,7 +367,7 @@ def test_abort_cancels_a_staged_or_uploading_file(client: TestClient, db_session
     assert abort(client, body).json() == {"ok": True}
     assert body["uploadId"] not in fake_storage.uploads and "abort_multipart" in fake_storage.calls
     row = db_session.execute(text("SELECT status, status_message FROM upload_file WHERE file_id = :id"),
-                             {"id": body["id"]}).one()
+                             {"id": body["fileId"]}).one()
     assert tuple(row) == ("error", "Upload cancelled")
 
 
@@ -346,14 +376,14 @@ def test_abort_after_the_upload_changes_nothing(client: TestClient, db_session: 
                                                 fake_storage: FakeStorage, status: str) -> None:  # noqa: F811
     """D15: any later status → {"ok": true}, the full row unchanged, no S3 call."""
     body = initiate(client).json()
-    db_session.execute(text("UPDATE upload_file SET status = :s WHERE file_id = :id"), {"s": status, "id": body["id"]})
+    db_session.execute(text("UPDATE upload_file SET status = :s WHERE file_id = :id"), {"s": status, "id": body["fileId"]})
     db_session.commit()
     before = dict(db_session.execute(text("SELECT * FROM upload_file WHERE file_id = :id"),
-                                     {"id": body["id"]}).mappings().one())
+                                     {"id": body["fileId"]}).mappings().one())
     calls = list(fake_storage.calls)
     assert abort(client, body).json() == {"ok": True}
     after = dict(db_session.execute(text("SELECT * FROM upload_file WHERE file_id = :id"),
-                                    {"id": body["id"]}).mappings().one())
+                                    {"id": body["fileId"]}).mappings().one())
     assert after == before and fake_storage.calls == calls
 
 
@@ -383,11 +413,12 @@ def test_list_hides_files_still_uploading(client: TestClient, db_session: Sessio
     """GET /api/uploads lists files past uploading, as Anugrah's hid `initiated`; nulls where the LLD has no column."""
     staged, uploading, done = (initiate(client, f"{n}.docx").json() for n in ("staged", "uploading", "done"))
     presign(client, uploading, [1])
-    db_session.execute(text("UPDATE upload_file SET status = 'processed' WHERE file_id = :id"), {"id": done["id"]})
+    done_key = upload_row(db_session, done)["s3_key"]
+    db_session.execute(text("UPDATE upload_file SET status = 'processed' WHERE file_id = :id"), {"id": done["fileId"]})
     db_session.commit()
     (item,) = client.get("/api/uploads").json()
     assert (item["id"], item["filename"], item["status"], item["s3_key"]) == \
-        (done["id"], "done.docx", "processed", done["key"])
+        (done["fileId"], "done.docx", "processed", done_key)
     assert (item["s3_location"], item["parent_id"], item["source_path"]) == (None, None, None)
 
 
@@ -396,19 +427,21 @@ def test_list_hides_files_still_uploading(client: TestClient, db_session: Sessio
 REAL_COMPLETE, REAL_EXISTS = storage.complete_multipart, storage.exists     # captured before the fake patches them
 
 
-def upload(client: TestClient, fake: FakeStorage, name: str = "valid.docx", size: int = 20 * MIB) -> dict[str, Any]:
+def upload(client: TestClient, fake: FakeStorage, db_session: Session, name: str = "valid.docx",
+           size: int = 20 * MIB) -> dict[str, Any]:
     """initiate → presign → PUT every part, as the browser does; return the body complete needs."""
     body = initiate(client, name, size).json()
     numbers = list(range(1, body["totalParts"] + 1))
     presign(client, body, numbers)
     parts = [{"partNumber": n, "etag": fake.put_part(body["uploadId"], n)} for n in numbers]
-    return {**body, "parts": parts}
+    meta = upload_row(db_session, body)
+    return {**body, "parts": parts, "batchId": str(meta["batch_id"]), "s3_key": meta["s3_key"]}
 
 
 def complete(client: TestClient, body: dict[str, Any], parts: list[dict[str, Any]] | None = None) -> Any:
     """POST complete with Anugrah's full body."""
     return client.post("/api/uploads/complete", json={
-        "id": body["id"], "fileId": body["fileId"], "key": body["key"], "uploadId": body["uploadId"],
+        "id": body["fileId"], "fileId": body["fileId"], "uploadId": body["uploadId"],
         "filename": "valid.docx", "fileSize": 20 * MIB, "contentType": "application/octet-stream",
         "parts": body["parts"] if parts is None else parts})
 
@@ -432,15 +465,15 @@ def test_complete_never_downloads_hashes_or_heads_the_object(
 ) -> None:
     """U3.3 spy: only CompleteMultipartUpload reaches S3 — any GetObject, HeadObject or download would hit an
     unqueued stub and fail. Then the Ingest confirm: uploaded, enqueued once with the file and organization."""
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     stubbed_s3.add_response("complete_multipart_upload", {"Location": "x"}, {
-        "Bucket": get_settings().S3_BUCKET, "Key": body["key"], "UploadId": body["uploadId"],
+        "Bucket": get_settings().S3_BUCKET, "Key": body["s3_key"], "UploadId": body["uploadId"],
         "MultipartUpload": {"Parts": [{"PartNumber": p["partNumber"], "ETag": p["etag"]} for p in body["parts"]]}})
     response = complete(client, body, parts=list(reversed(body["parts"])))       # sorted before S3 sees them
     assert response.status_code == 200, response.text
-    assert response.json() == {"id": body["id"], "location": f"s3://{get_settings().S3_BUCKET}/{body['key']}",
-                               "key": body["key"], "status": "uploaded", "batchId": body["batchId"]}
-    assert status_of(db_session, body) == "uploaded" and enqueued.calls == [(body["id"], str(POC_ORG))]
+    assert response.json() == {"id": body["fileId"], "location": f"s3://{get_settings().S3_BUCKET}/{body['s3_key']}",
+                               "key": body["s3_key"], "status": "uploaded", "batchId": body["batchId"]}
+    assert status_of(db_session, body) == "uploaded" and enqueued.calls == [(body["fileId"], str(POC_ORG))]
 
 
 def test_no_such_upload_but_the_object_exists_carries_on_to_confirm(
@@ -449,10 +482,10 @@ def test_no_such_upload_but_the_object_exists_carries_on_to_confirm(
 ) -> None:
     """§5.3 retry path: an earlier complete assembled the object, then died before confirm. S3 now says
     NoSuchUpload; a HEAD finds the object, so the file is confirmed and enqueued once."""
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     stubbed_s3.add_client_error("complete_multipart_upload", service_error_code="NoSuchUpload", http_status_code=404)
     stubbed_s3.add_response("head_object", {"ContentLength": 20 * MIB},
-                            {"Bucket": get_settings().S3_BUCKET, "Key": body["key"]})
+                            {"Bucket": get_settings().S3_BUCKET, "Key": body["s3_key"]})
     response = complete(client, body)
     assert response.status_code == 200 and response.json()["status"] == "uploaded"
     assert status_of(db_session, body) == "uploaded" and len(enqueued.calls) == 1
@@ -463,7 +496,7 @@ def test_no_such_upload_and_no_object_is_400_and_the_status_stays(
     enqueued: Recorder  # noqa: F811
 ) -> None:
     """The upload expired and nothing was assembled → 400 "Upload session expired — …"; still uploading."""
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     stubbed_s3.add_client_error("complete_multipart_upload", service_error_code="NoSuchUpload", http_status_code=404)
     stubbed_s3.add_client_error("head_object", service_error_code="404", http_status_code=404)
     response = complete(client, body)
@@ -476,7 +509,7 @@ def test_invalid_parts_are_400_and_the_file_can_retry(client: TestClient, db_ses
                                                       fake_storage: FakeStorage,  # noqa: F811
                                                       enqueued: Recorder) -> None:  # noqa: F811
     """A wrong ETag → 400 with S3's code and message (U3.6); the file stays uploading and completes on retry."""
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     wrong = [{**body["parts"][0], "etag": '"not-it"'}, *body["parts"][1:]]
     response = complete(client, body, parts=wrong)
     assert response.status_code == 400
@@ -490,9 +523,9 @@ def test_complete_again_returns_the_status_now_without_enqueueing(client: TestCl
                                                                   fake_storage: FakeStorage,  # noqa: F811
                                                                   enqueued: Recorder) -> None:  # noqa: F811
     """U3.5: after the worker moved it on, complete answers that status, touches nothing, enqueues nothing."""
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     complete(client, body)
-    db_session.execute(text("UPDATE upload_file SET status = 'processed' WHERE file_id = :id"), {"id": body["id"]})
+    db_session.execute(text("UPDATE upload_file SET status = 'processed' WHERE file_id = :id"), {"id": body["fileId"]})
     db_session.commit()
     calls = list(fake_storage.calls)
     response = complete(client, body)
@@ -503,7 +536,7 @@ def test_complete_again_returns_the_status_now_without_enqueueing(client: TestCl
 def test_complete_after_abort_answers_the_cancelled_status(client: TestClient, fake_storage: FakeStorage,  # noqa: F811
                                                            enqueued: Recorder) -> None:  # noqa: F811
     """A cancelled file is past uploading: complete returns `error` and never enqueues."""
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     abort(client, body)
     response = complete(client, body)
     assert response.status_code == 200 and response.json()["status"] == "error" and enqueued.calls == []
@@ -526,7 +559,7 @@ def test_complete_with_redis_down_still_answers_uploaded(client: TestClient, db_
         raise ConnectionError("Redis unreachable")
 
     monkeypatch.setattr(task_producer, "enqueue_process_upload", down)
-    body = upload(client, fake_storage)
+    body = upload(client, fake_storage, db_session)
     response = complete(client, body)
     assert response.status_code == 200 and response.json()["status"] == "uploaded"
     assert status_of(db_session, body) == "uploaded"

@@ -1,5 +1,5 @@
 /**
- * Batch review and commit — GET /api/v1/uploads/batches/{id}, …/staged, POST …/commit (upload-ingest-merge U7, U8).
+ * Batch review and commit — GET /api/v1/uploads/batches/{id}, POST …/commit (upload-ingest-merge U7, U8).
  */
 import type { ServerFileStatus } from '@/utils/statusMapping';
 
@@ -37,6 +37,8 @@ export interface CommitResult {
   skipped: { staged_id: string; file_name: string; reason: string }[];
   still_in_progress: number;
   documents: string[];
+  /** Library documents moved to a new version (Replace); absent when none. */
+  replaced?: { document_id: string; version: number; previous_version: number }[];
 }
 
 async function readJson<T>(response: Response, what: string): Promise<T> {
@@ -57,17 +59,34 @@ export async function fetchBatch(batchId: string): Promise<BatchStatus> {
   return readJson(await fetch(`${API_BASE}/api/v1/uploads/batches/${batchId}`), 'Loading the batch');
 }
 
-export async function fetchStaged(batchId: string): Promise<StagedCandidate[]> {
-  const body = await readJson<{ staged: StagedCandidate[] }>(
-    await fetch(`${API_BASE}/api/v1/uploads/batches/${batchId}/staged`),
-    'Loading the review list',
-  );
-  return body.staged;
-}
-
 export async function commitBatch(batchId: string): Promise<CommitResult> {
   return readJson(
     await fetch(`${API_BASE}/api/v1/uploads/batches/${batchId}/commit`, { method: 'POST' }),
     'Adding to the library',
   );
+}
+
+const COMMIT_RETRY_MS = 2000;
+const COMMIT_MAX_WAIT_MS = 120_000;
+
+/**
+ * Confirm & Continue: commit, and while files are still processing (still_in_progress > 0) commit again every ~2 s,
+ * for up to ~120 s. Returns everything the calls added, replaced and skipped, and what was still processing at the end.
+ */
+export async function commitBatchWhenReady(
+  batchId: string,
+  { retryMs = COMMIT_RETRY_MS, maxWaitMs = COMMIT_MAX_WAIT_MS }: { retryMs?: number; maxWaitMs?: number } = {},
+): Promise<CommitResult> {
+  const deadline = Date.now() + maxWaitMs;
+  const total: CommitResult = { added: 0, skipped: [], still_in_progress: 0, documents: [], replaced: [] };
+  for (;;) {
+    const result = await commitBatch(batchId);
+    total.added += result.added;
+    total.skipped.push(...result.skipped);
+    total.documents.push(...result.documents);
+    total.replaced!.push(...(result.replaced ?? []));
+    total.still_in_progress = result.still_in_progress;
+    if (result.still_in_progress === 0 || Date.now() + retryMs > deadline) return total;
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
+  }
 }

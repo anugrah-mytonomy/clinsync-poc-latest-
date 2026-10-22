@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { fetchBatch, fetchStaged, type BatchStatus, type StagedCandidate } from '@/utils/reviewApi';
+import { fetchBatch, type BatchStatus, type StagedCandidate } from '@/utils/reviewApi';
 import type { FileCandidateCounts } from '@/utils/statusMapping';
 
 export interface BatchView {
@@ -44,7 +44,8 @@ export const useBatchStatus = (
 
   const refresh = useCallback(async (batchId: string) => {
     try {
-      const [batch, staged] = await Promise.all([fetchBatch(batchId), fetchStaged(batchId)]);
+      const batch = await fetchBatch(batchId); // batch status only — no …/staged call
+      const staged: StagedCandidate[] = [];
       setBatches((prev) => ({
         ...prev,
         [batchId]: { batch, staged, counts: carryCounts(staged, prev[batchId]?.counts) },

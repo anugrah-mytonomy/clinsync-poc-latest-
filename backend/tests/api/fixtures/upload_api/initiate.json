@@ -21,10 +21,8 @@
       "access-control-allow-origin": "http://localhost:5173"
     },
     "body": {
-      "id": "036af1f0-1525-48fa-9ea4-8f35c9b1d115",
       "fileId": "036af1f0-1525-48fa-9ea4-8f35c9b1d115",
       "uploadId": "CwvvIPSs0ddRRhXlSsDySez3T6DyTA49oTYoXCEZwxANvbYzQcFCMRDo39u-WbHFEti7uQg6Dls2fw_8Ep7xOO7Ikjsw8y6DhYSrlOxXZeuh4N6ZnlxBRMkXMC0VfU67",
-      "key": "processed/036af1f0-1525-48fa-9ea4-8f35c9b1d115/report.pdf",
       "partSize": 8388608,
       "totalParts": 2
     }

@@ -12,6 +12,9 @@ htmlcov/
 # Local secrets
 .env
 
+# Local DB exports (Postgres → SQLite for browsing)
+data/
+
 # Generated fixtures
 backend/tests/fixtures/out/
 

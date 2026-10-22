@@ -36,9 +36,9 @@ def error_response(status: int, code: str, message: str) -> JSONResponse:
 
 
 def is_upload_api(request: Request) -> bool:
-    """True for Anugrah's /api/uploads/* routes, whose errors keep the {"detail": …} body."""
+    """True for the Upload APIs — /api/uploads/* and /clinsync/uploads/* — whose errors keep {"detail": …}."""
     path = request.url.path
-    return path == "/api/uploads" or path.startswith("/api/uploads/")
+    return path == "/api/uploads" or path.startswith(("/api/uploads/", "/clinsync/uploads/"))
 
 
 def detail_response(status: int, detail: Any, headers: dict[str, str] | None = None) -> JSONResponse:

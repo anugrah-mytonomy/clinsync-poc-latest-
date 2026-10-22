@@ -143,6 +143,14 @@ class SkippedOut(BaseModel):
     reason: str
 
 
+class ReplacedOut(BaseModel):
+    """A library document the commit moved to a new version (design.md §5.2a)."""
+
+    document_id: uuid.UUID
+    version: int
+    previous_version: int
+
+
 class CommitOut(BaseModel):
     """What a commit did (U8.2): how many were added, which were skipped and why, how many files remain."""
 
@@ -150,9 +158,10 @@ class CommitOut(BaseModel):
     skipped: list[SkippedOut]
     still_in_progress: int
     documents: list[uuid.UUID]
+    replaced: list[ReplacedOut] | None = None     # only when the commit replaced something (design.md §5.2a)
 
 
-@router.post("/batches/{batch_id}/commit", response_model=CommitOut)
+@router.post("/batches/{batch_id}/commit", response_model=CommitOut, response_model_exclude_none=True)
 def commit_batch(batch_id: uuid.UUID, db: Session = Depends(get_db_session)) -> CommitOut:
     """Add the batch's ready candidates to the library — incremental, idempotent (U8); 404 for an unknown batch."""
     try:
@@ -162,4 +171,5 @@ def commit_batch(batch_id: uuid.UUID, db: Session = Depends(get_db_session)) -> 
     except (ClientError, BotoCoreError) as exc:
         raise ApiError(502, "storage_error", f"S3 failed during the commit; nothing was added: {exc}") from exc
     return CommitOut(added=len(result.added), skipped=[SkippedOut(**s) for s in result.skipped],
-                     still_in_progress=result.still_in_progress, documents=result.added)
+                     still_in_progress=result.still_in_progress, documents=result.added,
+                     replaced=[ReplacedOut(**r) for r in result.replaced] or None)

@@ -98,7 +98,7 @@ async function readJsonOrThrow<T>(response: Response, context: string): Promise<
   return response.json() as Promise<T>;
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(new S3UploadAborted('Upload canceled.'));
@@ -117,7 +117,7 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /** PUTs one chunk with upload-progress events, resolving with its ETag response header. */
-function putChunk(
+export function putChunk(
   url: string,
   blob: Blob,
   signal: AbortSignal,

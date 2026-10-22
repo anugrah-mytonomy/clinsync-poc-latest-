@@ -21,7 +21,7 @@ from shared.constants import QUEUE_INGEST, TASK_PROCESS_UPLOAD
 from api.db import get_db_session
 from api.main import app
 from api.services import uploads
-from tests.db_helpers import full_row, make_file
+from tests.db_helpers import POC_ORG, full_row, make_file
 
 
 class Recorder:
@@ -238,6 +238,111 @@ def test_confirm_enqueues_only_after_commit(race_engine: Engine, committed_uploa
     with Session(race_engine) as session:
         assert uploads.confirm(session, committed_uploading_file, enqueue=check) == uploads.Confirmed("uploaded", True)
     assert seen == ["uploaded"]
+
+
+def test_confirm_staggers_ingest_enqueue_by_batch_order(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INGEST_STAGGER_SECONDS × row order → Celery countdown 0, 1, 2, … per file in the batch."""
+    from api.models import UploadBatch, UploadFile
+
+    monkeypatch.setattr(get_settings(), "INGEST_STAGGER_SECONDS", 1.0)
+    countdowns: list[int] = []
+
+    def capture(_file_id: str, _org: str, *, countdown: int = 0) -> None:
+        countdowns.append(countdown)
+
+    monkeypatch.setattr(task_producer, "enqueue_process_upload", capture)
+    batch = UploadBatch(organization_id=POC_ORG, created_by=0)
+    db_session.add(batch)
+    db_session.flush()
+    file_ids = []
+    for index in range(3):
+        row = UploadFile(
+            batch_id=batch.batch_id,
+            organization_id=POC_ORG,
+            file_name=f"doc-{index}.docx",
+            file_ext="docx",
+            size_bytes=100,
+            is_archive=False,
+            s3_key=f"incoming/{index}.docx",
+            status="uploading",
+        )
+        db_session.add(row)
+        db_session.flush()
+        file_ids.append(row.file_id)
+    db_session.commit()
+    for file_id in file_ids:
+        uploads.confirm(db_session, file_id)
+    assert countdowns == [0, 1, 2]
+
+
+def test_confirm_staggers_ingest_enqueue_by_batch_order(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INGEST_STAGGER_SECONDS × row order → Celery countdown 0, 1, 2, … per file in the batch."""
+    from api.models import UploadBatch, UploadFile
+
+    monkeypatch.setattr(get_settings(), "INGEST_STAGGER_SECONDS", 1.0)
+    countdowns: list[int] = []
+
+    def capture(_file_id: str, _org: str, *, countdown: int = 0) -> None:
+        countdowns.append(countdown)
+
+    monkeypatch.setattr(task_producer, "enqueue_process_upload", capture)
+    batch = UploadBatch(organization_id=POC_ORG, created_by=0)
+    db_session.add(batch)
+    db_session.flush()
+    file_ids = []
+    for index in range(3):
+        row = UploadFile(
+            batch_id=batch.batch_id,
+            organization_id=POC_ORG,
+            file_name=f"doc-{index}.docx",
+            file_ext="docx",
+            size_bytes=100,
+            is_archive=False,
+            s3_key=f"incoming/{index}.docx",
+            status="uploading",
+        )
+        db_session.add(row)
+        db_session.flush()
+        file_ids.append(row.file_id)
+    db_session.commit()
+    for file_id in file_ids:
+        uploads.confirm(db_session, file_id)
+    assert countdowns == [0, 1, 2]
+
+
+def test_confirm_staggers_ingest_enqueue_by_batch_order(db_session: Session, monkeypatch: pytest.MonkeyPatch) -> None:
+    """INGEST_STAGGER_SECONDS × row order → Celery countdown 0, 1, 2, … per file in the batch."""
+    from api.models import UploadBatch, UploadFile
+
+    monkeypatch.setattr(get_settings(), "INGEST_STAGGER_SECONDS", 1.0)
+    countdowns: list[int] = []
+
+    def capture(_file_id: str, _org: str, *, countdown: int = 0) -> None:
+        countdowns.append(countdown)
+
+    monkeypatch.setattr(task_producer, "enqueue_process_upload", capture)
+    batch = UploadBatch(organization_id=POC_ORG, created_by=0)
+    db_session.add(batch)
+    db_session.flush()
+    file_ids = []
+    for index in range(3):
+        row = UploadFile(
+            batch_id=batch.batch_id,
+            organization_id=POC_ORG,
+            file_name=f"doc-{index}.docx",
+            file_ext="docx",
+            size_bytes=100,
+            is_archive=False,
+            s3_key=f"incoming/{index}.docx",
+            status="uploading",
+        )
+        db_session.add(row)
+        db_session.flush()
+        file_ids.append(row.file_id)
+    db_session.commit()
+    for file_id in file_ids:
+        uploads.confirm(db_session, file_id)
+    assert countdowns == [0, 1, 2]
 
 
 def test_worker_app_keeps_kombu_retries(monkeypatch: pytest.MonkeyPatch) -> None:

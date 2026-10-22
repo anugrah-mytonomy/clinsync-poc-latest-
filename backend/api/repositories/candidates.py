@@ -134,7 +134,7 @@ def of_finished_files(session: Session, batch_id: uuid.UUID) -> list[Any]:
     """The candidates a commit may act on: only those of FINISHED files, by file then entry position."""
     return list(session.execute(text("""
         SELECT c.staged_id, c.source_file_id, c.file_name, c.file_ext, c.size_bytes, c.content_hash, c.s3_key,
-               c.status, c.proposed_title, c.title_norm
+               c.status, c.proposed_title, c.title_norm, f.replaces_document_id
         FROM staged_document c JOIN upload_file f ON f.file_id = c.source_file_id
         WHERE c.batch_id = :b AND f.status IN ('processed', 'partial', 'rejected', 'error')
         ORDER BY f.created_at, f.file_id, c.entry_index NULLS FIRST, c.source_entry_name"""), {"b": batch_id}).all())

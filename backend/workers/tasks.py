@@ -16,6 +16,9 @@ from celery import Celery, signals
 from celery.exceptions import SoftTimeLimitExceeded
 
 from shared.config import get_settings
+from shared import s3_paths
+from shared import s3_paths
+from shared import s3_paths
 from shared.constants import (
     QUEUE_INGEST, QUEUE_MAINTENANCE, TASK_ABANDONED_SWEEP, TASK_PROCESS_UPLOAD, TASK_RECONCILE_SWEEP, TASK_STALE_SWEEP,
 )
@@ -182,14 +185,33 @@ def s3() -> S3Store:
     return _per_process()[1]
 
 
-def staging_prefix(claim: FileClaim) -> str:
-    """Every staged object of one file lives under this prefix (design.md §8.3)."""
-    return f"ClinSync/staging/{claim.organization_id}/{claim.batch_id}/{claim.file_id}/"
+def processing_key(claim: FileClaim, name: str) -> str:
+    """Object key under clynsync/processing/{batch}/{filename} after ingest."""
+    return s3_paths.processing_key(claim.batch_id, name)
 
 
-def staging_key(claim: FileClaim, index: int, name: str) -> str:
-    """Deterministic staging key: a replay writes the same key, so no orphans and no duplicates (design.md §8.3)."""
-    return f"{staging_prefix(claim)}{index:04d}_{name}"
+def _delete_incoming_if_not_archive(claim: FileClaim, store: S3Store) -> None:
+    """Remove the uploaded object from incoming/; ZIP archives stay so S3 shows incoming + processing."""
+    if claim.is_archive:
+        log.info("incoming_kept", file_id=str(claim.file_id), s3_key=claim.s3_key)
+        return
+    store.delete_quietly(claim.s3_key)
+
+
+def _delete_incoming_if_not_archive(claim: FileClaim, store: S3Store) -> None:
+    """Remove the uploaded object from incoming/; ZIP archives stay so S3 shows incoming + processing."""
+    if claim.is_archive:
+        log.info("incoming_kept", file_id=str(claim.file_id), s3_key=claim.s3_key)
+        return
+    store.delete_quietly(claim.s3_key)
+
+
+def _delete_incoming_if_not_archive(claim: FileClaim, store: S3Store) -> None:
+    """Remove the uploaded object from incoming/; ZIP archives stay so S3 shows incoming + processing."""
+    if claim.is_archive:
+        log.info("incoming_kept", file_id=str(claim.file_id), s3_key=claim.s3_key)
+        return
+    store.delete_quietly(claim.s3_key)
 
 
 def process_document(api: BoundClient, claim: FileClaim, path: Path, limits: Limits, store: S3Store,
@@ -202,7 +224,7 @@ def process_document(api: BoundClient, claim: FileClaim, path: Path, limits: Lim
     api.progress(detected_type=d.type)
     if d.type != claim.file_ext:                                 # R5.3
         raise Rejected(mismatch_reason(claim.file_ext, d))
-    key = staging_key(claim, index=0, name=claim.file_name)
+    key = processing_key(claim, claim.file_name)
     store.copy(claim.s3_key, key)                                # server-side copy
     api.upsert_candidate(entry_name=None, entry_index=None, file_name=claim.file_name,
                          file_ext=claim.file_ext, size_bytes=path.stat().st_size,
@@ -218,7 +240,7 @@ def poc_delay() -> None:
 
 
 def _process_entry(api: BoundClient, claim: FileClaim, zf: zipfile.ZipFile, e: zipfile.ZipInfo, i: int,
-                   limits: Limits, store: S3Store) -> bool:
+                   limits: Limits, store: S3Store, written_keys: list[str], seen_names: dict[str, int]) -> bool:
     """Handle one archive entry (R7.2–R7.4); return True if it was rejected. Archive-level problems raise Rejected."""
     name = PurePosixPath(e.filename).name
     ext = PurePosixPath(name).suffix.lower().lstrip(".")
@@ -242,8 +264,10 @@ def _process_entry(api: BoundClient, claim: FileClaim, zf: zipfile.ZipFile, e: z
         d = detect_file_type(tmp, limits)                                 # inner problems → entry-level
         if d.type != ext:                                                 # R7.3 — not stored
             return reject(mismatch_reason(ext, d))
-        key = staging_key(claim, index=i, name=name)
+        stored_name = s3_paths.disambiguate_basename(name, seen_names)
+        key = processing_key(claim, stored_name)
         store.upload(tmp, key)
+        written_keys.append(key)
         api.upsert_candidate(entry_name=e.filename, entry_index=i, file_name=name, file_ext=ext,
                              size_bytes=e.file_size, s3_key=key, status="processed",
                              content_hash=digest.hexdigest())                          # R7.4, U5.2
@@ -271,6 +295,8 @@ def process_archive(api: BoundClient, claim: FileClaim, path: Path, beat: Heartb
         raise Rejected("Archive is damaged")                     # design.md §11 — BadZipFile on open
     if outer.type != "zip":
         raise Rejected(mismatch_reason("zip", outer))            # e.g. a .docx renamed .zip
+    written_keys: list[str] = []
+    seen_names: dict[str, int] = {}
     try:
         with _open_archive(path) as zf:
             guarded = inspect_archive(zf, limits)                # R6 — archive-level, EVERY entry, hidden ones too
@@ -281,11 +307,12 @@ def process_archive(api: BoundClient, claim: FileClaim, path: Path, beat: Heartb
                 if i < claim.entries_done:                       # R8.2 — resume
                     continue
                 beat.raise_if_superseded()                       # stop fast if ownership lost
-                rejected_any |= _process_entry(api, claim, zf, e, i, limits, store)
+                rejected_any |= _process_entry(api, claim, zf, e, i, limits, store, written_keys, seen_names)
                 api.progress(entries_done=i + 1)                 # R8.1 — after, never before
                 poc_delay()                                      # ENTRY_DELAY_SECONDS — POC only
     except Rejected:                                             # §8.5a — archive-level only
-        store.delete_prefix(staging_prefix(claim))               # delete FIRST, then finish (in process_upload)
+        for key in written_keys:
+            store.delete_quietly(key)
         raise
     return FinalStatus("partial" if rejected_any else "processed")   # R7.6
 
@@ -313,11 +340,11 @@ def process_upload(self: Any, file_id: str, organization_id: str) -> None:
         else:
             final = process_document(api, claim, local, LIMITS, store, digest.hexdigest())
         api.finish(final)                                                     # R10.3
-        store.delete_quietly(claim.s3_key)                                    # R10.2 — lifecycle rule is the backstop
+        _delete_incoming_if_not_archive(claim, store)
         log.info("finished", **ctx, status=final.status)
     except Rejected as r:                                                     # R11.2 — never retried
         api.finish(FinalStatus("rejected", str(r)))
-        store.delete_quietly(claim.s3_key)
+        _delete_incoming_if_not_archive(claim, store)
         log.info("finished", **ctx, status="rejected", reason=str(r))
     except S3ObjectNotFound:                                                  # deterministic: no retry
         api.finish(FinalStatus("error", "Uploaded object not found"))
@@ -332,7 +359,7 @@ def process_upload(self: Any, file_id: str, organization_id: str) -> None:
         if claim.attempt_count >= settings.MAX_ATTEMPTS:                      # R11.3 — last attempt: fail, don't release
             message = f"Could not be processed after {claim.attempt_count} attempts: {e!r}"
             api.finish(FinalStatus("error", message))
-            store.delete_quietly(claim.s3_key)
+            _delete_incoming_if_not_archive(claim, store)
             log.warning("finished", **ctx, status="error", reason=message)
             return
         try:

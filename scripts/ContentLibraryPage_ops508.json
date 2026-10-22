@@ -1,0 +1,90 @@
+[
+  {
+    "line": 98,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "      const answers = await checkDuplicates(\n        pending.map((item) => ({ clientRef: item.id, filename: item.name, fileSize: item.size })),\n      );",
+      "new_string": "      const answers = await checkDuplicates(pending.map((item) => ({ filename: item.name, fileSize: item.size })));"
+    }
+  },
+  {
+    "line": 110,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "import { checkDuplicates, fetchLibraryDocuments, getDownloadUrl, type LibraryDocument } from '@/utils/uploadsApi';",
+      "new_string": "import {\n  checkDuplicates,\n  createUploadBatch,\n  fetchLibraryDocuments,\n  getDownloadUrl,\n  type LibraryDocument,\n} from '@/utils/uploadsApi';"
+    }
+  },
+  {
+    "line": 110,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  const startUpload = (toUpload: UploadQueueItem[]) => {\n    const id = crypto.randomUUID(); // one batch per Upload click, sent with every initiate (D4)\n    clearItems((item) => item.source === 'content-library' && isBlockedFromUpload(item) && !item.cloudUpload);\n    for (const item of toUpload) updateItem(item.id, { replacesDocumentId: item.replacesDocumentId });\n    startCloudUploads(toUpload, id);\n    setBatchId(id);\n    setStep('uploading');\n  };",
+      "new_string": "  const startUpload = async (toUpload: UploadQueueItem[]) => {\n    const id = await createUploadBatch();\n    clearItems((item) => item.source === 'content-library' && isBlockedFromUpload(item) && !item.cloudUpload);\n    for (const item of toUpload) updateItem(item.id, { replacesDocumentId: item.replacesDocumentId });\n    startCloudUploads(toUpload, id);\n    setBatchId(id);\n    setStep('uploading');\n  };"
+    }
+  },
+  {
+    "line": 110,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "      if (list.length > 0) setConflicts({ pending, list });\n      else startUpload(pending);",
+      "new_string": "      if (list.length > 0) setConflicts({ pending, list });\n      else await startUpload(pending);"
+    }
+  },
+  {
+    "line": 110,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "    if (toUpload.length > 0) startUpload(toUpload);",
+      "new_string": "    if (toUpload.length > 0) void startUpload(toUpload);"
+    }
+  },
+  {
+    "line": 118,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  createUploadBatch,",
+      "new_string": "  getUploadBatchId,"
+    }
+  },
+  {
+    "line": 118,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "    const id = await createUploadBatch();",
+      "new_string": "    const id = await getUploadBatchId();"
+    }
+  },
+  {
+    "line": 208,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "      const answers = await checkDuplicates(pending.map((item) => ({ filename: item.name, fileSize: item.size })));",
+      "new_string": "      const answers = await checkDuplicates(\n        pending.map((item) => {\n          const payload: Parameters<typeof checkDuplicates>[0][number] = {\n            filename: item.name,\n            fileSize: item.size,\n          };\n          if (item.extension === 'zip' && item.validation?.zipEntries?.length) {\n            payload.entries = item.validation.zipEntries.map((entry) => ({\n              name: entry.path,\n              fileSize: entry.size,\n            }));\n          }\n          return payload;\n        }),\n      );"
+    }
+  },
+  {
+    "line": 210,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "  checkDuplicates,",
+      "new_string": "  checkDuplicates,\n  type DuplicateCheckFile,"
+    }
+  },
+  {
+    "line": 210,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "          const payload: Parameters<typeof checkDuplicates>[0][number] = {",
+      "new_string": "          const payload: DuplicateCheckFile = {"
+    }
+  },
+  {
+    "line": 218,
+    "input": {
+      "path": "c:\\Users\\anugr\\POC-Worker-Celery\\frontend\\src\\pages\\content-library\\ContentLibraryPage.tsx",
+      "old_string": "              name: entry.path,",
+      "new_string": "              filename: entry.path,"
+    }
+  }
+]

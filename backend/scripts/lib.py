@@ -155,17 +155,17 @@ def s3_keys(prefix: str) -> list[str]:
 
 def staging_keys_for(file_id: str) -> list[str]:
     """Staged objects of one file (…/staging/{org}/{batch}/{file_id}/…)."""
-    return [k for k in s3_keys("ClinSync/staging/") if f"/{file_id}/" in k]
+    return [k for k in s3_keys("clynsync/processing/") if f"/{file_id}/" in k]
 
 
 def staging_keys_for_batch(batch_id: str) -> list[str]:
     """Staged objects of every file in a batch."""
-    return [k for k in s3_keys("ClinSync/staging/") if f"/{batch_id}/" in k]
+    return [k for k in s3_keys("clynsync/processing/") if f"/{batch_id}/" in k]
 
 
 def incoming_key(run_id: str, fixture: str) -> str:
     """A fresh incoming/ key for one scenario run."""
-    return f"ClinSync/incoming/{run_id}/{fixture}"
+    return f"clynsync/incoming/{run_id}/{fixture}"
 
 
 def seed(files: list[tuple[str, str]]) -> tuple[str, list[str]]:

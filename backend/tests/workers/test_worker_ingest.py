@@ -160,7 +160,7 @@ def test_valid_docx_is_staged_then_finished_then_incoming_deleted(ingest: Any, m
     rec, claim = Recorder(), a_claim()
     store = FakeStore(rec, Path(shutil.copy(fixtures_dir / "valid.docx", tmp_path)))
     run(ingest, monkeypatch, claim, store, rec)
-    key = f"ClinSync/staging/{claim.organization_id}/{claim.batch_id}/{claim.file_id}/0000_valid.docx"
+    key = f"clynsync/processing/{claim.batch_id}/valid.docx"
     work = [c for c in rec.calls if c[0] != "heartbeat"]
     assert [c[0] for c in work] == ["claim", "with_token", "download", "progress", "copy", "upsert_candidate",
                                     "finish", "delete"]
@@ -249,14 +249,14 @@ def test_superseded_at_finish_is_logged_and_incoming_kept(ingest: Any, monkeypat
 
 def test_archive_goes_through_process_archive_then_finish_then_delete(ingest: Any, monkeypatch: pytest.MonkeyPatch,
                                                                       fixtures_dir: Path, tmp_path: Path) -> None:
-    """mixed.zip: 4 entries uploaded (3 .docx, notes.pdf), readme.txt rejected, finish(partial), then delete."""
+    """mixed.zip: 4 entries uploaded (3 .docx, notes.pdf), readme.txt rejected, finish(partial); ZIP kept in incoming."""
     rec = Recorder()
     store = FakeStore(rec, Path(shutil.copy(fixtures_dir / "mixed.zip", tmp_path)))
     claim = a_claim("mixed.zip", is_archive=True)
     run(ingest, monkeypatch, claim, store, rec)
     assert finals(rec) == [FinalStatus("partial")]
     assert sum(n == "upload" for n in rec.names()) == 4 and sum(n == "upsert_candidate" for n in rec.names()) == 5
-    assert rec.names()[-1] == "delete" and rec.names().index("finish") < rec.names().index("delete")
+    assert "delete" not in rec.names()
 
 
 def test_heartbeat_thread_is_stopped_when_the_task_ends(ingest: Any, monkeypatch: pytest.MonkeyPatch,
@@ -269,13 +269,11 @@ def test_heartbeat_thread_is_stopped_when_the_task_ends(ingest: Any, monkeypatch
     assert not [t for t in threading.enumerate() if t.name.startswith("heartbeat-")]
 
 
-def test_staging_key_is_deterministic(ingest: Any) -> None:
-    """…/staging/{org}/{batch}/{file_id}/{index:04d}_{name}; the same claim always gives the same key."""
+def test_processing_key_is_deterministic(ingest: Any) -> None:
+    """clynsync/processing/{batch}/{name}; the same claim always gives the same key."""
     claim = a_claim()
-    assert ingest.staging_key(claim, 0, "valid.docx") == ingest.staging_key(claim, 0, "valid.docx")
-    assert ingest.staging_key(claim, 7, "a.docx").endswith(f"/{claim.file_id}/0007_a.docx")
-    assert ingest.staging_prefix(claim) == (f"ClinSync/staging/{claim.organization_id}/{claim.batch_id}/"
-                                            f"{claim.file_id}/")
+    assert ingest.processing_key(claim, "valid.docx") == ingest.processing_key(claim, "valid.docx")
+    assert ingest.processing_key(claim, "a.docx") == f"clynsync/processing/{claim.batch_id}/a.docx"
 
 
 def test_task_is_registered_under_the_queue_contract_name(ingest: Any) -> None:

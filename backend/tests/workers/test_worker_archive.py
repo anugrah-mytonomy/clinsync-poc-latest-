@@ -16,7 +16,7 @@ from workers.clients import FileClaim, FinalStatus
 from tests.engine_helpers import POC_LIMITS
 
 ORG, BATCH, FILE = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-PREFIX = f"ClinSync/staging/{ORG}/{BATCH}/{FILE}/"
+PROC = f"clynsync/processing/{BATCH}/"
 
 
 class SimulatedCrash(BaseException):
@@ -78,12 +78,16 @@ class MemoryStore:
         self.objects: dict[str, bytes] = {}
         self.crash_after_upload_of: int | None = None
         self.deleted_prefixes: list[str] = []
+        self.deleted_keys: list[str] = []
+        self.upload_count = 0
 
     def upload(self, path: Path, key: str) -> None:
         """Store the object, then crash if scripted to crash after uploading this entry."""
         self.objects[key] = path.read_bytes()
-        if self.crash_after_upload_of is not None and key.startswith(f"{PREFIX}{self.crash_after_upload_of:04d}_"):
+        if self.crash_after_upload_of is not None and self.upload_count == self.crash_after_upload_of:
+            self.upload_count += 1
             raise SimulatedCrash("after upload")
+        self.upload_count += 1
 
     def delete_prefix(self, prefix: str) -> int:
         """Delete every object under prefix."""
@@ -92,6 +96,11 @@ class MemoryStore:
         for k in doomed:
             del self.objects[k]
         return len(doomed)
+
+    def delete_quietly(self, key: str) -> None:
+        """Remove one object (archive-level rejection cleanup)."""
+        self.deleted_keys.append(key)
+        self.objects.pop(key, None)
 
 
 class Beat:
@@ -108,7 +117,7 @@ class Beat:
 
 def claim(entries_done: int = 0, name: str = "mixed.zip") -> FileClaim:
     """A claim for the one archive file, with the given resume point."""
-    return FileClaim(file_id=FILE, organization_id=ORG, batch_id=BATCH, s3_key=f"ClinSync/incoming/x/{name}",
+    return FileClaim(file_id=FILE, organization_id=ORG, batch_id=BATCH, s3_key=f"clynsync/incoming/{BATCH}/x_{name}",
                      file_name=name, file_ext="zip", is_archive=True, entries_done=entries_done, attempt_count=1,
                      claim_token=uuid.uuid4())
 
@@ -143,13 +152,13 @@ def mixed(docs: dict[str, bytes], tmp_path: Path) -> tuple[Path, dict[str, dict[
                ("fake.docx", docs["exe"]), ("cardiology/overview.docx", docs["docx"]),
                ("pulmonology/overview.docx", docs["docx"])]
     expected = {
-        "docs/a.docx": {"status": "processed", "s3_key": f"{PREFIX}0000_a.docx"},
+        "docs/a.docx": {"status": "processed", "s3_key": f"{PROC}a.docx"},
         "notes.pdf": {"status": "rejected", "reject_reason": ".pdf is not supported"},
-        "docs/b.docx": {"status": "processed", "s3_key": f"{PREFIX}0002_b.docx"},
+        "docs/b.docx": {"status": "processed", "s3_key": f"{PROC}b.docx"},
         "fake.docx": {"status": "rejected",
                       "reject_reason": "File content does not match .docx — it appears to be unknown"},
-        "cardiology/overview.docx": {"status": "processed", "s3_key": f"{PREFIX}0004_overview.docx"},
-        "pulmonology/overview.docx": {"status": "processed", "s3_key": f"{PREFIX}0005_overview.docx"},
+        "cardiology/overview.docx": {"status": "processed", "s3_key": f"{PROC}overview.docx"},
+        "pulmonology/overview.docx": {"status": "processed", "s3_key": f"{PROC}overview (1).docx"},
     }
     return write_zip(tmp_path / "mixed.zip", members), expected
 
@@ -192,7 +201,7 @@ def test_done_when_resume_from_three_of_five(ingest: Any, docs: dict[str, bytes]
     ingest.process_archive(api, claim(entries_done=3), path, Beat(), POC_LIMITS, store)
     assert api.upserts == [3, 4]
     assert api.progress_calls[-1] == {"entries_done": 5}
-    assert set(store.objects) == {f"{PREFIX}0003_d3.docx", f"{PREFIX}0004_d4.docx"}
+    assert set(store.objects) == {f"{PROC}d3.docx", f"{PROC}d4.docx"}
 
 
 # --- crash windows (design.md §8.3 table) ---
@@ -245,12 +254,12 @@ def test_unsafe_outer_archive_is_rejected_whole(ingest: Any, fixtures_dir: Path,
     assert api.candidates == {} and api.entries_total is None
 
 
-def test_outer_lie_mid_way_deletes_the_staging_prefix_then_reraises(ingest: Any, fixtures_dir: Path) -> None:
-    """Third entry fails its outer CRC → delete_prefix (entries 0–1's objects gone) → Rejected re-raised (§8.5a)."""
+def test_outer_lie_mid_way_deletes_staged_objects_then_reraises(ingest: Any, fixtures_dir: Path) -> None:
+    """Third entry fails its outer CRC → staged keys deleted → Rejected re-raised (§8.5a)."""
     api, store = StatefulApi(), MemoryStore()
     with pytest.raises(Rejected, match="does not match its index"):
         ingest.process_archive(api, claim(), fixtures_dir / "lying3.zip", Beat(), POC_LIMITS, store)
-    assert api.upserts == [0, 1] and store.deleted_prefixes == [PREFIX] and store.objects == {}
+    assert api.upserts == [0, 1] and len(store.deleted_keys) == 2 and store.objects == {}
 
 
 def test_inner_bomb_docx_is_an_entry_rejection(ingest: Any, fixtures_dir: Path) -> None:
@@ -272,7 +281,7 @@ def test_same_file_name_in_different_folders_gets_separate_keys(ingest: Any, doc
                                             ("pulmonology/overview.docx", docs["docx"])])
     api, store = StatefulApi(), MemoryStore()
     assert ingest.process_archive(api, claim(), path, Beat(), POC_LIMITS, store) == FinalStatus("processed")
-    assert set(store.objects) == {f"{PREFIX}0000_overview.docx", f"{PREFIX}0001_overview.docx"}
+    assert set(store.objects) == {f"{PROC}overview.docx", f"{PROC}overview (1).docx"}
     assert {n: c["file_name"] for n, c in api.candidates.items()} == {
         "cardiology/overview.docx": "overview.docx", "pulmonology/overview.docx": "overview.docx"}
 
@@ -284,7 +293,7 @@ def test_spaces_and_non_ascii_names_are_kept_exactly(ingest: Any, docs: dict[str
     api, store = StatefulApi(), MemoryStore()
     ingest.process_archive(api, claim(), path, Beat(), POC_LIMITS, store)
     assert api.candidates[name]["file_name"] == "Überblick Herz 2026.docx"
-    assert list(store.objects) == [f"{PREFIX}0000_Überblick Herz 2026.docx"]
+    assert list(store.objects) == [f"{PROC}Überblick Herz 2026.docx"]
 
 
 @pytest.mark.parametrize(("entry", "reason", "stored_ext"), [
@@ -357,7 +366,7 @@ def test_superseded_mid_loop_stops_before_the_next_entry(ingest: Any, docs: dict
     with pytest.raises(ClaimSuperseded):
         ingest.process_archive(api, claim(), path, SupersededAfter(checks_ok=2), POC_LIMITS, store)
     assert api.upserts == [0, 1]
-    assert api.entries_done == 2 and set(store.objects) == {f"{PREFIX}0000_a.docx"}
+    assert api.entries_done == 2 and set(store.objects) == {f"{PROC}a.docx"}
     assert store.deleted_prefixes == []
 
 
@@ -418,8 +427,8 @@ def test_real_heartbeat_409_stops_process_upload_without_finishing(ingest: Any, 
 # --- Mac and hidden entries, folder depth (upload-ingest-merge U5.3, U5.4) ---
 
 MAC_EXPECTED = {
-    "a.docx": {"status": "processed", "s3_key": f"{PREFIX}0000_a.docx", "entry_index": 0},
-    "docs/b.docx": {"status": "processed", "s3_key": f"{PREFIX}0001_b.docx", "entry_index": 1},
+    "a.docx": {"status": "processed", "s3_key": f"{PROC}a.docx", "entry_index": 0},
+    "docs/b.docx": {"status": "processed", "s3_key": f"{PROC}b.docx", "entry_index": 1},
     "docs/deep/c.docx": {"status": "rejected", "entry_index": 2,
                          "reject_reason": "Folders nested too deeply — at most one subfolder is supported"},
 }
@@ -433,7 +442,7 @@ def assert_mac_deep_state(api: StatefulApi, store: MemoryStore) -> None:
         got = api.candidates[name]
         assert (got["status"], got["entry_index"]) == (want["status"], want["entry_index"]), name
         assert got.get("s3_key") == want.get("s3_key") and got.get("reject_reason") == want.get("reject_reason"), name
-    assert sorted(store.objects) == [f"{PREFIX}0000_a.docx", f"{PREFIX}0001_b.docx"]
+    assert sorted(store.objects) == [f"{PROC}a.docx", f"{PROC}b.docx"]
 
 
 def test_mac_zip_numbers_only_real_entries_and_rejects_the_deep_one(ingest: Any, fixtures_dir: Path) -> None:

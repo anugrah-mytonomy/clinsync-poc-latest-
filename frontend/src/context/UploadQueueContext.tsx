@@ -1,8 +1,13 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { isDuplicateCloudError } from '@/utils/duplicateCheck';
-import { S3MultipartUploader, S3UploadAborted, type S3UploadResult } from '@/utils/s3ChunkedUpload';
-import type { CloudUploadState, UploadQueueItem } from '@/types/contentLibrary';
+import {
+  ContentLibraryUploader,
+  S3UploadAborted,
+  UploadApiError,
+  discardUpload,
+  type CompleteResult,
+} from '@/utils/contentLibraryUploadApi';
+import type { CloudUploadState, UploadChoices, UploadQueueItem } from '@/types/contentLibrary';
 
 /**
  * Whole-app upload queue: mounted once in DashboardLayout (which stays alive
@@ -13,7 +18,13 @@ import type { CloudUploadState, UploadQueueItem } from '@/types/contentLibrary';
  * would be torn down on unmount and abandon the upload's UI state (the
  * in-flight XHRs themselves have no relation to React's lifecycle either
  * way, but nothing would be left to show their progress or complete them).
+ *
+ * Uploads use the Content Library Upload API (/clinsync/uploads/*): about 4 files at a time, each initiate → PUT
+ * parts → complete on its own. Retry discards the failed upload and initiates again in the same batch with the
+ * same choices.
  */
+
+const MAX_PARALLEL_FILES = Number(import.meta.env.VITE_UPLOAD_CONCURRENCY) || 4;
 
 export const isBlockedFromUpload = (item: UploadQueueItem): boolean =>
   item.status === 'validation-failed' ||
@@ -31,7 +42,8 @@ interface UploadQueueContextValue {
   items: UploadQueueItem[];
   enqueueItems: (items: UploadQueueItem[]) => void;
   updateItem: (id: string, patch: Partial<UploadQueueItem>) => void;
-  startCloudUpload: (item: UploadQueueItem, batchId?: string) => void;
+  /** Queue this row's upload in the batch of its Upload click; choices go with initiate (and with any Retry). */
+  startCloudUpload: (item: UploadQueueItem, batchId: string, choices?: UploadChoices) => void;
   retryCloudUpload: (id: string) => void;
   removeItem: (id: string) => void;
   clearItems: (predicate: (item: UploadQueueItem) => boolean) => void;
@@ -39,9 +51,20 @@ interface UploadQueueContextValue {
 
 const UploadQueueContext = createContext<UploadQueueContextValue | null>(null);
 
+interface PendingRun {
+  id: string;
+  run: () => Promise<void>;
+}
+
 export const UploadQueueProvider = ({ children }: { children: ReactNode }) => {
   const [items, setItems] = useState<UploadQueueItem[]>([]);
-  const uploadersRef = useRef(new Map<string, S3MultipartUploader>());
+  const uploadersRef = useRef(new Map<string, ContentLibraryUploader>());
+  const itemsRef = useRef(items);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  const waitingRef = useRef<PendingRun[]>([]);
+  const runningRef = useRef(0);
 
   const patchCloudUpload = useCallback(
     (id: string, updater: (cloudUpload: CloudUploadState) => CloudUploadState) => {
@@ -58,84 +81,120 @@ export const UploadQueueProvider = ({ children }: { children: ReactNode }) => {
     [],
   );
 
-  const handleCloudUploadSettled = useCallback(
-    (id: string, run: Promise<S3UploadResult>) => {
-      run
-        .then((result) => {
-          uploadersRef.current.delete(id);
-          patchCloudUpload(id, (cloudUpload) => ({
-            ...cloudUpload,
-            status: 'success',
-            percent: 100,
-            uploadedBytes: cloudUpload.totalBytes,
-            key: result.key,
-            location: result.location,
-            fileId: result.id, // joins the server's file statuses to this row
-            batchId: result.batchId ?? cloudUpload.batchId,
-          }));
-          setItems((prev) =>
-            prev.map((item) =>
-              item.id === id && !isBlockedFromUpload(item) ? { ...item, status: 'success' } : item,
-            ),
-          );
-        })
-        .catch((err: unknown) => {
-          if (err instanceof S3UploadAborted) return;
-          const message = err instanceof Error ? err.message : 'Cloud upload failed.';
-          const isDuplicate = isDuplicateCloudError(message);
-
-          patchCloudUpload(id, (cloudUpload) => ({ ...cloudUpload, status: 'failed', error: message }));
-          setItems((prev) =>
-            prev.map((item) => {
-              if (item.id !== id || isBlockedFromUpload(item)) return item;
-              if (isDuplicate) {
-                return {
-                  ...item,
-                  status: 'validation-failed',
-                  validation: { valid: false, errors: [message] },
-                };
-              }
-              return { ...item, status: 'upload-failed' };
-            }),
-          );
+  // About MAX_PARALLEL_FILES uploads at a time across the whole queue; the rest wait their turn at 0%.
+  const pump = useCallback(() => {
+    const drain = () => {
+      while (runningRef.current < MAX_PARALLEL_FILES && waitingRef.current.length > 0) {
+        const next = waitingRef.current.shift()!;
+        runningRef.current += 1;
+        void next.run().finally(() => {
+          runningRef.current -= 1;
+          drain();
         });
+      }
+    };
+    drain();
+  }, []);
+
+  const settle = useCallback(
+    async (id: string, run: Promise<CompleteResult>) => {
+      try {
+        const result = await run;
+        uploadersRef.current.delete(id);
+        patchCloudUpload(id, (cloudUpload) => ({
+          ...cloudUpload,
+          status: 'success',
+          percent: 100,
+          uploadedBytes: cloudUpload.totalBytes,
+          fileId: result.fileId,
+          error: undefined,
+        }));
+        setItems((prev) =>
+          prev.map((item) => (item.id === id && !isBlockedFromUpload(item) ? { ...item, status: 'success' } : item)),
+        );
+      } catch (err) {
+        if (err instanceof S3UploadAborted) return;
+        const message = err instanceof Error ? err.message : 'Upload failed.';
+        const retryable = !(err instanceof UploadApiError) || err.retryable;
+        patchCloudUpload(id, (cloudUpload) => ({ ...cloudUpload, status: 'failed', error: message, retryable }));
+        setItems((prev) =>
+          prev.map((item) => (item.id === id && !isBlockedFromUpload(item) ? { ...item, status: 'upload-failed' } : item)),
+        );
+      }
     },
     [patchCloudUpload],
   );
 
-  const startCloudUpload = useCallback(
-    (item: UploadQueueItem, batchId?: string) => {
-      if (isBlockedFromUpload(item)) return;
-      // One batch per Upload click (D4); a retry of this row keeps the batch it started in.
-      const batch = batchId ?? item.cloudUpload?.batchId;
-
-      const existing = uploadersRef.current.get(item.id);
-      if (existing && item.cloudUpload?.status === 'failed') {
-        patchCloudUpload(item.id, (cloudUpload) => ({ ...cloudUpload, status: 'uploading', error: undefined }));
-        setItems((prev) => prev.map((row) => (row.id === item.id ? { ...row, status: 'queued' } : row)));
-        handleCloudUploadSettled(item.id, existing.retry());
-        return;
-      }
-
-      const uploader = new S3MultipartUploader(item.file, {
-        onProgress: (progress) =>
-          patchCloudUpload(item.id, (cloudUpload) => ({
-            ...cloudUpload,
-            status: 'uploading',
-            uploadedBytes: progress.uploadedBytes,
-            totalBytes: progress.totalBytes,
-            percent: progress.percent,
-          })),
-        batchId: batch,
+  const queueUpload = useCallback(
+    (item: UploadQueueItem, batchId: string, choices: UploadChoices | undefined) => {
+      patchCloudUpload(item.id, (cloudUpload) => ({
+        ...cloudUpload,
+        status: 'uploading',
+        uploadedBytes: 0,
+        totalBytes: item.file.size,
+        percent: 0,
+        error: undefined,
+        retryable: undefined,
+        batchId,
+        fileId: undefined,
+        uploadId: undefined,
+      }));
+      waitingRef.current.push({
+        id: item.id,
+        run: () => {
+          if (!itemsRef.current.some((row) => row.id === item.id)) return Promise.resolve(); // removed meanwhile
+          const uploader = new ContentLibraryUploader(
+            item.file,
+            { batchId, ...choices },
+            {
+              onProgress: (progress) =>
+                patchCloudUpload(item.id, (cloudUpload) => ({
+                  ...cloudUpload,
+                  uploadedBytes: progress.uploadedBytes,
+                  totalBytes: progress.totalBytes,
+                  percent: progress.percent,
+                })),
+              onInitiated: ({ fileId, uploadId }) =>
+                patchCloudUpload(item.id, (cloudUpload) => ({ ...cloudUpload, fileId, uploadId })),
+            },
+          );
+          uploadersRef.current.set(item.id, uploader);
+          return settle(item.id, uploader.start());
+        },
       });
-      uploadersRef.current.set(item.id, uploader);
-      patchCloudUpload(item.id, (cloudUpload) => ({ ...cloudUpload, status: 'uploading', error: undefined, batchId: batch }));
-      handleCloudUploadSettled(item.id, uploader.start());
+      pump();
     },
-    [handleCloudUploadSettled, patchCloudUpload],
+    [patchCloudUpload, pump, settle],
+  );
+
+  const startCloudUpload = useCallback(
+    (item: UploadQueueItem, batchId: string, choices?: UploadChoices) => {
+      if (isBlockedFromUpload(item)) return;
+      setItems((prev) =>
+        prev.map((row) => (row.id === item.id ? { ...row, file: item.file, uploadChoices: choices } : row)),
+      );
+      queueUpload(item, batchId, choices);
+    },
+    [queueUpload],
+  );
+
+  const retryCloudUpload = useCallback(
+    (id: string) => {
+      const item = itemsRef.current.find((row) => row.id === id);
+      const cloud = item?.cloudUpload;
+      if (!item || isBlockedFromUpload(item) || !cloud?.batchId) return;
+      // Same batch, same choices; no new duplicate check or conflict modal.
+      const failed = cloud.fileId && cloud.uploadId ? { fileId: cloud.fileId, uploadId: cloud.uploadId } : null;
+      setItems((prev) => prev.map((row) => (row.id === id ? { ...row, status: 'queued' } : row)));
+      void (failed ? discardUpload(failed.fileId, failed.uploadId) : Promise.resolve()).then(() =>
+        queueUpload(item, cloud.batchId!, item.uploadChoices),
+      );
+    },
+    [queueUpload],
   );
 
   const cancelCloudUpload = useCallback((id: string) => {
+    waitingRef.current = waitingRef.current.filter((pending) => pending.id !== id);
     uploadersRef.current.get(id)?.cancel();
     uploadersRef.current.delete(id);
   }, []);
@@ -147,17 +206,6 @@ export const UploadQueueProvider = ({ children }: { children: ReactNode }) => {
   const updateItem = useCallback((id: string, patch: Partial<UploadQueueItem>) => {
     setItems((prev) => prev.map((item) => (item.id === id ? { ...item, ...patch } : item)));
   }, []);
-
-  const retryCloudUpload = useCallback(
-    (id: string) => {
-      setItems((prev) => {
-        const item = prev.find((row) => row.id === id);
-        if (item && !isBlockedFromUpload(item)) startCloudUpload(item);
-        return prev;
-      });
-    },
-    [startCloudUpload],
-  );
 
   const removeItem = useCallback(
     (id: string) => {

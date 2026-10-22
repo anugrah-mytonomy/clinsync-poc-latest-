@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from shared.config import get_settings
 from shared.logging import configure_logging, get_logger
-from api.routes import internal, library, multipart, uploads
+from api.routes import clinsync_uploads, internal, library, multipart, uploads
 from api.error_handlers import install_error_handlers
 
 configure_logging()
@@ -37,6 +37,7 @@ app.include_router(internal.router)
 app.include_router(uploads.router)
 app.include_router(multipart.router)
 app.include_router(library.router)
+app.include_router(clinsync_uploads.router)
 
 
 @app.get("/health")

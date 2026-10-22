@@ -39,6 +39,12 @@ class Settings(BaseSettings):
 
     # POC only — absent in production
     ENTRY_DELAY_SECONDS: float = 0
+    # Seconds between each file of a batch starting ingest (Celery countdown); 0 = no stagger.
+    INGEST_STAGGER_SECONDS: float = 0
+    # Seconds between each file of a batch starting ingest (Celery countdown); 0 = no stagger.
+    INGEST_STAGGER_SECONDS: float = 0
+    # Seconds between each file of a batch starting ingest (Celery countdown); 0 = no stagger.
+    INGEST_STAGGER_SECONDS: float = 0
     POC_ORGANIZATION_ID: UUID4 | None = None
     POC_USER_ID: int = 0                 # the system actor (OD-19) in created_by, until auth exists
 
